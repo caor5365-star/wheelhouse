@@ -556,6 +556,39 @@ def test_approve_ci_filters_to_current_pr_head_and_number():
     check("approve_ci: run list is filtered by commit", "--commit" in cmd and "sha1" in cmd)
 
 
+def test_approve_ci_ambiguous_or_missing_pr_association_returns_error():
+    runs = [{"databaseId": 101, "workflowName": "CI"}]
+    cases = [
+        ("ambiguous", [{"number": 1}, {"number": 2}]),
+        ("missing", []),
+    ]
+    for label, pull_requests in cases:
+        status, message, calls = run_approve_ci(
+            SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
+            [SimpleNamespace(returncode=0, stdout="", stderr="")],
+            {"101": {"head_sha": "sha1", "pull_requests": pull_requests}})
+        check("approve_ci: %s run PR association -> error" % label, status == "error")
+        check("approve_ci: %s run PR association is not approved" % label,
+              calls["approved"] == [])
+        check("approve_ci: %s run PR association is named" % label,
+              "pull request" in message or "could not be verified" in message)
+
+
+def test_approve_ci_full_run_list_returns_error_without_approving():
+    runs = [{"databaseId": i, "workflowName": "Run%d" % i} for i in range(100, 130)]
+    details = {str(i): {"head_sha": "sha1", "pull_requests": [{"number": 1}]}
+               for i in range(100, 130)}
+    approvals = [SimpleNamespace(returncode=0, stdout="", stderr="") for _ in runs]
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
+        approvals,
+        details)
+    check("approve_ci: full run-list page -> error", status == "error")
+    check("approve_ci: full run-list page mentions truncation risk",
+          "possibly truncated" in message)
+    check("approve_ci: full run-list page approves nothing", calls["approved"] == [])
+
+
 def test_approve_ci_no_matching_runs_returns_noop_without_approving():
     runs = [{"databaseId": 101, "workflowName": "Old"}]
     details = {"101": {"head_sha": "oldsha", "pull_requests": [{"number": 1}]}}
@@ -714,6 +747,8 @@ def main():
     test_approve_ci_any_failed_post_returns_error()
     test_approve_ci_hold_message_caps_risky_file_list()
     test_approve_ci_filters_to_current_pr_head_and_number()
+    test_approve_ci_ambiguous_or_missing_pr_association_returns_error()
+    test_approve_ci_full_run_list_returns_error_without_approving()
     test_approve_ci_no_matching_runs_returns_noop_without_approving()
     test_approve_ci_run_detail_failure_returns_error()
     test_approve_ci_non_default_base_warns_without_posture_read()

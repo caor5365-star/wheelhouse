@@ -764,11 +764,14 @@ def _workflow_run_matches_pr(slug, run_id, pr, head_sha):
     prs = run.get("pull_requests")
     if not isinstance(prs, list):
         return (None, "run detail returned unexpected pull_requests")
-    numbers = set()
+    numbers = []
     for item in prs:
-        if isinstance(item, dict) and item.get("number") is not None:
-            numbers.add(str(item.get("number")))
-    if str(pr) not in numbers:
+        if not isinstance(item, dict) or item.get("number") is None:
+            return (None, "run detail returned unexpected pull_requests")
+        numbers.append(str(item.get("number")))
+    if len(numbers) != 1:
+        return (None, "run detail has %d pull request associations" % len(numbers))
+    if numbers[0] != str(pr):
         return (False, "not PR #%s" % pr)
     return (True, "")
 
@@ -823,9 +826,10 @@ def approve_ci(owner, repo, pr, posture=None):
 
     warn = _approve_warning_suffix(verdict)
 
+    run_list_limit = 30
     lst = subprocess.run(
         ["gh", "run", "list", "--branch", head_ref, "--commit", head_sha,
-         "--status", "action_required", "--limit", "30", "-R", slug,
+         "--status", "action_required", "--limit", str(run_list_limit), "-R", slug,
          "--json", "databaseId,workflowName,headSha,headBranch,url"],
         capture_output=True, text=True)
     if lst.returncode != 0:
@@ -842,6 +846,10 @@ def approve_ci(owner, repo, pr, posture=None):
     if not isinstance(runs, list):
         return ("error", "#%s (%s@%s): workflow run list returned unexpected data%s"
                 % (pr, head_ref, head_sha[:8], warn))
+    if len(runs) >= run_list_limit:
+        return ("error", "#%s (%s@%s): workflow run list returned %d runs (limit %d); "
+                "refusing to approve a possibly truncated list%s"
+                % (pr, head_ref, head_sha[:8], len(runs), run_list_limit, warn))
     if not runs:
         return ("noop", "#%s (%s@%s): no workflow runs awaiting approval%s"
                 % (pr, head_ref, head_sha[:8], warn))
