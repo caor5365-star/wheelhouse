@@ -305,6 +305,10 @@ def _display_list(values, limit=10):
     return "%s (+%d more; %d total)" % (", ".join(items[:limit]), len(items) - limit, len(items))
 
 
+def _workflow_command_text(value):
+    return re.sub(r"[\r\n]+", " ", str(value))
+
+
 def _non_default_base_posture(base_ref, default_branch):
     base = str(base_ref or "").strip()
     default = str(default_branch or "").strip()
@@ -454,13 +458,14 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
             handled, card_note, log_note = _auto_approve_or_card(
                 owner, name, pr["number"], posture, auto_enabled, pr.get("changed_files"))
             if handled:
-                print("::notice::%s#%s %s" % (name, pr["number"], log_note), file=sys.stderr)
+                print("::notice::%s#%s %s"
+                      % (name, pr["number"], _workflow_command_text(log_note)), file=sys.stderr)
                 continue  # provably safe (or nothing to approve) -> NO card
             # Carded: log exactly one per-PR outcome line so a silent approve
             # failure (the inert-in-production failure mode) can never hide in the
             # scan log again. The card body itself is unchanged.
             print("::warning::wheelhouse auto-approve carded %s#%s: %s"
-                  % (name, pr["number"], log_note), file=sys.stderr)
+                  % (name, pr["number"], _workflow_command_text(log_note)), file=sys.stderr)
             if card_note:  # surface the safety warning on the card body / response
                 item["warning"] = card_note
 

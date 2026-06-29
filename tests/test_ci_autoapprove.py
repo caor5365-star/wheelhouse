@@ -524,6 +524,30 @@ def test_carded_approve_error_is_logged_with_status_and_message():
           "auto-approve did not complete (error: api fail: 403 forbidden)" == (items[0].get("warning") or ""))
 
 
+def test_carded_approve_multiline_error_is_logged_on_one_line():
+    message = "api fail: first line\nsecond line\r\nthird line\rfourth line"
+    result, items, calls = run_build_repo([needs_ci_pr()],
+                                          approve_result=("error", message))
+    err = calls["stderr"]
+    lines = err.splitlines()
+    check("log: multiline approve error emits one physical warning line", len(lines) == 1)
+    check("log: multiline approve error is collapsed in workflow command",
+          "api fail: first line second line third line fourth line" in err)
+    check("log: multiline approve error does not leave continuation text",
+          all(line.startswith("::warning::") for line in lines))
+    check("log: card body still carries the original multiline warning",
+          ("auto-approve did not complete (error: %s)" % message) == (items[0].get("warning") or ""))
+
+
+def test_auto_approved_multiline_message_is_logged_on_one_line():
+    result, items, calls = run_build_repo([needs_ci_pr()],
+                                          approve_result=("approved", "approved\nrun"))
+    err = calls["stderr"]
+    lines = err.splitlines()
+    check("log: multiline approve success emits one physical notice line", len(lines) == 1)
+    check("log: multiline approve success is collapsed in workflow command", "approved run" in err)
+
+
 def test_carded_approve_noop_is_logged_with_status():
     result, items, calls = run_build_repo([needs_ci_pr()],
                                           approve_result=("noop", "no matching runs"))
@@ -892,6 +916,8 @@ def main():
     test_approve_exception_falls_back_to_card()
     test_auto_approved_pr_emits_one_notice()
     test_carded_approve_error_is_logged_with_status_and_message()
+    test_carded_approve_multiline_error_is_logged_on_one_line()
+    test_auto_approved_multiline_message_is_logged_on_one_line()
     test_carded_approve_noop_is_logged_with_status()
     test_carded_approve_exception_is_logged()
     test_carded_unsafe_verdict_is_logged_without_approve_status()
