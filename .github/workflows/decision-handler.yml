@@ -144,13 +144,35 @@ jobs:
             echo "</target-content>"
           } > target.txt
 
+      # Fetch THIS card's own comment thread (this repo's issue) with the default
+      # token - NOT FLEET_TOKEN - so Claude has continuity across follow-up
+      # questions. apply_decision.py's assemble_history keeps ONLY the
+      # maintainer's and the bot's own turns (the trusted conversation) and drops
+      # everyone else, so no non-owner comment can reach the prompt. The thread
+      # already contains the triggering comment; it is excluded there by id.
+      - id: nl-comments
+        if: steps.nl-gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -uo pipefail
+          gh api --paginate \
+            "/repos/${REPO_SLUG}/issues/${ISSUE}/comments?per_page=100" \
+            --jq '.[] | {id: .id, login: .user.login, body: .body}' \
+            > card_comments.json || : > card_comments.json
+
       - id: nl-prompt
         if: steps.nl-gate.outputs.proceed == 'true'
         env:
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           KIND: ${{ steps.nl-gate.outputs.kind }}
           TARGET_FILE: target.txt
+          COMMENTS_FILE: card_comments.json
+          TRIGGER_COMMENT_ID: ${{ github.event.comment.id }}
         run: python scripts/apply_decision.py nl-prompt
 
       # Claude maps intent -> writes decision.json. It is restricted to the
