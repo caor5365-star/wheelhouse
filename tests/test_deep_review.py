@@ -21,7 +21,7 @@ so these tests pin the *wiring* instead:
     receives FLEET_TOKEN; the verdict is posted with the default token;
   * investigate trigger: decision-handler.yml has `actions: write` and an
     Investigate step that clears the box and dispatches deep-review.yml via
-    workflow_dispatch on the default token.
+    workflow_dispatch on the default token, carrying the parsed target binding.
 """
 import os
 import sys
@@ -154,6 +154,61 @@ def test_code_grounded_checkout_and_tool_isolation():
 
 
 # --------------------------------------------------------------------------- #
+# dispatch target binding
+# --------------------------------------------------------------------------- #
+def test_workflow_dispatch_uses_immutable_target_inputs():
+    dr = read(".github", "workflows", "deep-review.yml")
+    dh = read(".github", "workflows", "decision-handler.yml")
+    doc = load_yaml(".github", "workflows", "deep-review.yml")
+    steps = steps_of(doc, "deep-review")
+
+    check("workflow: dispatch requires target repo input",
+          "repo:" in dr and "Target repo name from the decision-card state" in dr)
+    check("workflow: dispatch requires target number input",
+          "number:" in dr and "Target PR or issue number from the decision-card state" in dr)
+    check("workflow: dispatch requires target kind input",
+          "kind:" in dr and "Decision-card kind" in dr)
+    check("workflow: dispatch accepts the captured head SHA",
+          "head_sha:" in dr and "Target PR head SHA from the decision-card state" in dr)
+
+    resolve = next((s for s in steps if s.get("id") == "resolve"), None)
+    check("workflow: a resolve step exists", resolve is not None)
+    if resolve:
+        run = str(resolve.get("run", ""))
+        dispatch_arm = run.split("else", 1)[0]
+        env = yaml.safe_dump(resolve.get("env", {}))
+        check("workflow: dispatch resolve reads workflow inputs",
+              all(name in env for name in ("INPUT_REPO", "INPUT_NUMBER", "INPUT_KIND", "INPUT_HEAD_SHA"))
+              and 'if [ "$EVENT_NAME" = "workflow_dispatch" ]' in run)
+        check("workflow: dispatch resolve does NOT re-read the mutable card body",
+              "gh issue view" not in dispatch_arm
+              and "python scripts/wheelhouse_core.py state" not in dispatch_arm)
+        check("workflow: manual label path is the state-block parse path",
+              "EVENT_ISSUE_BODY" in env and "python scripts/wheelhouse_core.py state repo" in run)
+        check("workflow: target binding is syntax-validated before output",
+              "invalid target repo" in run and "invalid target number" in run
+              and "invalid target head SHA" in run)
+
+    verify = next((s for s in steps if "verify target head" in str(s.get("name", "")).lower()), None)
+    check("workflow: PR deep review verifies the captured head SHA", verify is not None)
+    if verify:
+        check("workflow: head verification compares checkout HEAD to captured SHA",
+              "git -C target-src rev-parse HEAD" in str(verify.get("run", ""))
+              and "steps.resolve.outputs.head_sha" in yaml.safe_dump(verify))
+
+    check("handler: investigate dispatch passes target repo",
+          '-f repo="$TARGET_REPO"' in dh and "steps.decide.outputs.target_repo" in dh)
+    check("handler: investigate dispatch passes target number",
+          '-f number="$TARGET_NUMBER"' in dh and "steps.decide.outputs.target_number" in dh)
+    check("handler: investigate dispatch passes target kind",
+          '-f kind="$TARGET_KIND"' in dh and "steps.decide.outputs.kind" in dh)
+    check("handler: investigate dispatch passes captured head SHA",
+          '-f head_sha="$HEAD_SHA"' in dh and "steps.decide.outputs.head_sha" in dh)
+    check("handler: investigate no longer dispatches issue-only",
+          'workflow run deep-review.yml -f issue="$ISSUE"' not in dh)
+
+
+# --------------------------------------------------------------------------- #
 # investigate trigger wiring in the decision handler
 # --------------------------------------------------------------------------- #
 def test_handler_investigate_wiring():
@@ -179,6 +234,11 @@ def test_handler_investigate_wiring():
               "github.event.issue.body" not in yaml.safe_dump(inv.get("env", {})))
         check("handler: investigate dispatches deep-review.yml via workflow_dispatch",
               "workflow run deep-review.yml" in run)
+        check("handler: investigate dispatches the parsed target binding",
+              '-f repo="$TARGET_REPO"' in run
+              and '-f number="$TARGET_NUMBER"' in run
+              and '-f kind="$TARGET_KIND"' in run
+              and '-f head_sha="$HEAD_SHA"' in run)
         check("handler: investigate runs on the default token (no FLEET_TOKEN)",
               "github.token" in str(inv.get("env", {}).get("GH_TOKEN", ""))
               and "FLEET_TOKEN" not in yaml.safe_dump(inv))
@@ -194,6 +254,7 @@ def main():
     test_enable_flag_removed()
     test_token_absent_message()
     test_code_grounded_checkout_and_tool_isolation()
+    test_workflow_dispatch_uses_immutable_target_inputs()
     test_handler_investigate_wiring()
     print()
     if _failures:

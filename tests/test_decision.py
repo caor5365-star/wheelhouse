@@ -172,6 +172,11 @@ def test_investigate_is_non_consuming():
     check("investigate: emits the investigate output", out.get("investigate") == "investigate")
     check("investigate: leaves decision EMPTY (does NOT consume the card)",
           out.get("decision", "") == "")
+    check("investigate: still carries the immutable target binding",
+          out.get("target_repo") == "lavish-axi"
+          and str(out.get("target_number")) == "42"
+          and out.get("kind") == "pr-review"
+          and out.get("head_sha") == "abc")
 
 
 def test_consuming_actions_unchanged_by_investigate_routing():

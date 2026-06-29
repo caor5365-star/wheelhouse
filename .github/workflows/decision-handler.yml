@@ -107,6 +107,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
           OPT_KEY: ${{ steps.decide.outputs.investigate }}
+          TARGET_REPO: ${{ steps.decide.outputs.target_repo }}
+          TARGET_NUMBER: ${{ steps.decide.outputs.target_number }}
+          TARGET_KIND: ${{ steps.decide.outputs.kind }}
+          HEAD_SHA: ${{ steps.decide.outputs.head_sha }}
         run: |
           set -uo pipefail
           if gh issue view "$ISSUE" --json body --jq .body > investigate_current_body.md; then
@@ -116,7 +120,15 @@ jobs:
               gh issue edit "$ISSUE" --body-file investigate_body.md || true
             fi
           fi
-          if ! gh workflow run deep-review.yml -f issue="$ISSUE"; then
+          if [ -z "$TARGET_REPO" ] || [ -z "$TARGET_NUMBER" ] || [ -z "$TARGET_KIND" ]; then
+            gh issue comment "$ISSUE" --body \
+              "Couldn't start the investigation (card state is missing target coordinates)." || true
+          elif ! gh workflow run deep-review.yml \
+            -f issue="$ISSUE" \
+            -f repo="$TARGET_REPO" \
+            -f number="$TARGET_NUMBER" \
+            -f kind="$TARGET_KIND" \
+            -f head_sha="$HEAD_SHA"; then
             gh issue comment "$ISSUE" --body \
               "Couldn't start the investigation (workflow dispatch failed). Apply the \`needs-deep-review\` label to run it manually." || true
           fi

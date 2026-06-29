@@ -173,8 +173,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   portability (a public Wheelhouse's `FLEET_TOKEN` need not even have write access
   here). `workflow_dispatch` via `github.token` IS the documented exception to
   recursion-prevention, so it reliably fires; that is why decision-handler needs
-  `actions: write`. The manual `needs-deep-review` label path is unchanged (a
-  human applying it raises the `labeled` event normally).
+  `actions: write`. The dispatch carries the parsed `repo`/`number`/`kind`/
+  `head_sha` from the tick event, and `deep-review.yml` uses those immutable
+  inputs for bot-dispatched runs instead of re-reading the mutable card body.
+  The manual `needs-deep-review` label path is unchanged (a human applying it
+  raises the `labeled` event normally) and remains the only path that parses the
+  card body in `deep-review.yml`.
   This is a deliberate asymmetry: the manual `needs-deep-review` label path authorizes only the repository owner.
   A configured co-maintainer uses the Investigate checkbox, which runs through the maintainer-gated decision-handler (`wheelhouse_core.maintainers()` = owner + configured maintainer).
   `investigate` is in the

@@ -38,6 +38,18 @@ on:
       issue:
         description: "Decision-card issue number to deep-review"
         required: true
+      repo:
+        description: "Target repo name from the decision-card state"
+        required: true
+      number:
+        description: "Target PR or issue number from the decision-card state"
+        required: true
+      kind:
+        description: "Decision-card kind"
+        required: true
+      head_sha:
+        description: "Target PR head SHA from the decision-card state"
+        required: false
 
 permissions:
   contents: read
@@ -113,26 +125,55 @@ jobs:
           gh issue comment "$ISSUE" --body \
             "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." || true
 
-      # Derive the target coordinates from the card's hidden state block, and the
-      # ref to check out: a PR's head for a review/ci card, the default branch for
-      # an issue-triage card.
+      # Resolve the target coordinates and the ref to check out: a PR's head for a
+      # review/ci card, the default branch for an issue-triage card.
       - id: resolve
         if: steps.gate.outputs.enabled == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          ISSUE: ${{ steps.target.outputs.issue }}
+          EVENT_ISSUE_BODY: ${{ github.event.issue.body }}
+          INPUT_REPO: ${{ github.event.inputs.repo }}
+          INPUT_NUMBER: ${{ github.event.inputs.number }}
+          INPUT_KIND: ${{ github.event.inputs.kind }}
+          INPUT_HEAD_SHA: ${{ github.event.inputs.head_sha }}
         run: |
           set -euo pipefail
-          card_body="$(gh issue view "$ISSUE" --json body --jq .body)"
-          export ISSUE_BODY="$card_body"
-          repo="$(python scripts/wheelhouse_core.py state repo)"
-          number="$(python scripts/wheelhouse_core.py state number)"
-          kind="$(python scripts/wheelhouse_core.py state kind)"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            repo="$INPUT_REPO"
+            number="$INPUT_NUMBER"
+            kind="$INPUT_KIND"
+            head_sha="$INPUT_HEAD_SHA"
+          else
+            export ISSUE_BODY="$EVENT_ISSUE_BODY"
+            repo="$(python scripts/wheelhouse_core.py state repo)"
+            number="$(python scripts/wheelhouse_core.py state number)"
+            kind="$(python scripts/wheelhouse_core.py state kind)"
+            head_sha="$(python scripts/wheelhouse_core.py state head_sha)"
+          fi
+
+          case "$kind" in
+            pr-review|ci-approval|issue-triage) ;;
+            *) echo "::error::invalid decision-card kind: $kind"; exit 1 ;;
+          esac
+          if ! printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+$'; then
+            echo "::error::invalid target repo: $repo"
+            exit 1
+          fi
+          if ! printf '%s' "$number" | grep -Eq '^[0-9]+$'; then
+            echo "::error::invalid target number: $number"
+            exit 1
+          fi
+          if [ -n "$head_sha" ] && ! printf '%s' "$head_sha" | grep -Eq '^[0-9A-Fa-f]{7,64}$'; then
+            echo "::error::invalid target head SHA: $head_sha"
+            exit 1
+          fi
+
           {
             echo "repo=$repo"
             echo "number=$number"
             echo "kind=$kind"
+            echo "head_sha=$head_sha"
             echo "slug=${GITHUB_REPOSITORY_OWNER}/${repo}"
             if [ "$kind" = "issue-triage" ]; then
               echo "ref="                         # empty -> the target's default branch
@@ -154,6 +195,22 @@ jobs:
           path: target-src
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Verify target head binding
+        if: steps.gate.outputs.enabled == 'true' && steps.resolve.outputs.head_sha != '' && steps.resolve.outputs.kind != 'issue-triage'
+        env:
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git -C target-src rev-parse HEAD)"
+          if [ "$actual" != "$HEAD_SHA" ]; then
+            {
+              echo "Deep review did not run because the target PR head moved after the card decision."
+              echo
+              echo "Expected \`$HEAD_SHA\`, checked out \`$actual\`. Re-scan or refresh the card and investigate again."
+            } > verdict.md
+            exit 1
+          fi
 
       # Build the prompt: the maintainer's card text (trusted) plus a read-only
       # fetch of the diff/issue (untrusted DATA). The card body uses the default

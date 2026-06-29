@@ -269,6 +269,10 @@ def cmd_parse():
         # action on the target.
         set_output("decision", "")
         set_output("investigate", decision)
+        set_output("target_repo", state.get("repo", ""))
+        set_output("target_number", state.get("number", ""))
+        set_output("kind", kind)
+        set_output("head_sha", state.get("head_sha", ""))
         return
 
     set_output("decision", decision)
