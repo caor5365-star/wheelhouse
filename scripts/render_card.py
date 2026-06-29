@@ -67,7 +67,7 @@ NON_REFRESHABLE_LABELS = frozenset({"processing", "resolved", "blocked"})
 
 # The fields whose change makes a card materially stale and worth re-rendering.
 # Title / summary / recommendation re-render naturally; they are NOT triggers.
-MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority")
+MATERIAL_FIELDS = ("head_sha", "comp", "tests", "kind", "priority", "options")
 
 # Sentinel for a material field absent from an old card's state block. It can
 # never equal a real value, so a card written before these fields were carried
@@ -90,16 +90,31 @@ def card_labels(item):
     ]
 
 
+def card_options(item):
+    kind = item.get("kind", "pr-review")
+    return item.get("options") or CHECKBOX_OPTIONS.get(kind, ["close", "hold"])
+
+
+def normalized_options(options):
+    if options is None:
+        return []
+    if isinstance(options, str):
+        options = [options]
+    return sorted({str(o) for o in options})
+
+
 def material_signature(item):
-    """The material fields exactly as `render` stores them in the state block.
-    Same defaults as the card body/labels so a card never compares unequal to
-    itself."""
+    """The material comparison signature, with the same defaults as the card
+    body/labels. Options compare as a normalized set so order-only changes do
+    not make a card stale."""
+    kind = item.get("kind", "pr-review")
     return {
         "head_sha": item.get("head_sha", "") or "",
         "comp": item.get("comp", "n/a"),
         "tests": item.get("tests", "n/a"),
-        "kind": item.get("kind", "pr-review"),
+        "kind": kind,
         "priority": item.get("priority", "low"),
+        "options": normalized_options(card_options(item)),
     }
 
 
@@ -108,7 +123,15 @@ def _state_material(state):
     card (pre-refresh-feature) reads as `_UNKNOWN` so it never matches a real
     value - that card refreshes once and backfills the fields."""
     s = state or {}
-    return {f: s.get(f, _UNKNOWN) for f in MATERIAL_FIELDS}
+    material = {}
+    for field in MATERIAL_FIELDS:
+        if field not in s:
+            material[field] = _UNKNOWN
+        elif field == "options":
+            material[field] = normalized_options(s.get(field))
+        else:
+            material[field] = s.get(field)
+    return material
 
 
 def material_changed(item, state):
@@ -149,10 +172,10 @@ def render(item):
     repo = item["repo"]
     number = int(item["number"])
     title = (item.get("title") or "").strip() or "(no title)"
-    options = item.get("options") or CHECKBOX_OPTIONS.get(kind, ["close", "hold"])
+    options = card_options(item)
 
-    # `head_sha`/`kind` plus the material set (comp/tests/priority) let a refresh
-    # cheaply and deterministically decide "did this materially change?".
+    # The stored material set lets a refresh cheaply and deterministically decide
+    # "did this materially change?".
     state = {
         "repo": repo,
         "number": number,
@@ -160,7 +183,8 @@ def render(item):
         "head_sha": item.get("head_sha", "") or "",
         "options": options,
     }
-    state.update(material_signature(item))
+    state.update({k: v for k, v in material_signature(item).items()
+                  if k != "options"})
 
     short = title if len(title) <= 70 else title[:67] + "..."
     issue_title = "[%s#%d] %s" % (repo, number, short)

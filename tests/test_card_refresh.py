@@ -9,10 +9,10 @@ taken when it was created. These tests cover the three pure pieces both the
 event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) rely on:
 
   * change detection - `material_changed` is true iff a material field
-    (head_sha / compliance / tests / kind / priority) differs from the card's
-    stored state, with legacy cards missing the new fields treated as changed
-    exactly once (a safe one-time refresh that backfills them), and the legacy
-    `triage-state` marker still parsing;
+    (head_sha / compliance / tests / kind / priority / options) differs from
+    the card's stored state, with legacy cards missing the new fields treated
+    as changed exactly once (a safe one-time refresh that backfills them), and
+    the legacy `triage-state` marker still parsing;
   * the refreshability guard - `is_refreshable` refuses to rewrite a card that
     is mid-decision (`processing`/`resolved`/`blocked`), so a refresh never
     clobbers an in-flight decision or races the handler;
@@ -68,6 +68,7 @@ def test_state_block_carries_material_fields():
     check("state: carries tests", st.get("tests") == "green")
     check("state: carries kind", st.get("kind") == "pr-review")
     check("state: carries priority", st.get("priority") == "med")
+    check("state: options is material", "options" in rc.MATERIAL_FIELDS)
     # legacy fields are still there (the handler reads these).
     check("state: still carries repo/number/options",
           st.get("repo") == "lavish-axi" and st.get("number") == 42
@@ -96,6 +97,23 @@ def test_each_material_field_triggers_a_change():
           rc.material_changed(item(kind="ci-approval"), st) is True)
     check("change: priority differs -> changed",
           rc.material_changed(item(priority="high"), st) is True)
+
+
+def test_options_set_change_triggers_but_reorder_does_not():
+    it = item(options=["merge", "close", "hold"])
+    st = state_of(it)
+    check("change: option removed -> changed",
+          rc.material_changed(item(options=["merge", "hold"]), st) is True)
+    check("change: option added -> changed",
+          rc.material_changed(item(options=["merge", "close", "hold", "approve-ci"]), st) is True)
+    check("change: options reordered -> NOT changed",
+          rc.material_changed(item(options=["hold", "close", "merge"]), st) is False)
+
+
+def test_render_preserves_options_order_in_state_block():
+    st = state_of(item(options=["hold", "merge", "close"]))
+    check("state: options order stays as provided",
+          st.get("options") == ["hold", "merge", "close"])
 
 
 def test_non_material_change_is_not_a_trigger():
@@ -292,6 +310,8 @@ def main():
     test_state_block_carries_material_fields()
     test_material_changed_round_trip_is_noop()
     test_each_material_field_triggers_a_change()
+    test_options_set_change_triggers_but_reorder_does_not()
+    test_render_preserves_options_order_in_state_block()
     test_non_material_change_is_not_a_trigger()
     test_legacy_card_missing_new_fields_refreshes_once()
     test_legacy_triage_marker_still_parses_for_change_check()

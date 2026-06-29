@@ -35,7 +35,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   `{repo, number, kind, head_sha, options}` plus the material fields
   `{comp, tests, priority}` (the latter three added so a refresh can cheaply and
   deterministically decide "did this target materially change?" - see "Card
-  refresh" in Sharp edges). `render_card.py` writes that marker, but
+  refresh" in Sharp edges). `options` is also material for refresh comparison,
+  but is normalized as a sorted set so checkbox reordering alone does not
+  refresh the card. `render_card.py` writes that marker, but
   `parse_state_block` also accepts the legacy `<!-- triage-state: ... -->`
   marker (cards rendered before the rename) - back-compat that must stay so a live
   queue keeps working. It also tolerates old `wheelhouse-state` cards that lack
@@ -93,9 +95,11 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Card refresh (an open card must reflect CURRENT target state).** Both the
   event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) keep a
   card current: when a target's MATERIAL state changes - `head_sha`, compliance
-  (`comp`), tests (`tests`), `kind`, or `priority` - the card is re-rendered in
-  place; title/summary/recommendation re-render naturally and are NOT change
-  triggers. The shared pure helpers live in `render_card.py`
+  (`comp`), tests (`tests`), `kind`, `priority`, or checkbox `options` - the
+  card is re-rendered in place; title/summary/recommendation re-render naturally
+  and are NOT change triggers. Option comparisons use set equality; display
+  order remains the order provided in the card body/state. The shared pure
+  helpers live in `render_card.py`
   (`material_changed`, `is_refreshable`, `plan_label_update`); `reconcile.py`
   pre-checks them (using the card row it already listed) so the common
   no-change case never hits the API, and `upsert_card` re-checks them before it
@@ -189,9 +193,11 @@ repo's token):
 ## Validation
 
 No build step. Validate with `python -m py_compile scripts/*.py tests/*.py`, run
-the unit tests (`python tests/test_decision.py` - mocks the LLM, no network - and
+the unit tests (`python tests/test_decision.py` - mocks the LLM, no network,
 `python tests/test_card_refresh.py` - the card-refresh change-detection /
-refreshability-guard / label-replace logic, pure functions, no network), and
+refreshability-guard / label-replace logic, pure functions, no network, and
+`python tests/test_reconcile.py` - reconcile routing and stale-card self-healing,
+no network), and
 YAML-parse `.github/workflows/*.yml` + `wheelhouse.config.yml` +
 `.github/ISSUE_TEMPLATE/*.yml` (run `actionlint` if available; fetch the binary
 via its `download-actionlint.bash` if not). The live LLM paths (deep-review,
