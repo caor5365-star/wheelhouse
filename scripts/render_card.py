@@ -126,9 +126,9 @@ def _label_names(labels):
 
 
 def is_refreshable(labels):
-    """A card is refreshable only in the pure `needs-decision` state: none of the
-    NON_REFRESHABLE_LABELS (processing/resolved/blocked) present."""
-    return _label_names(labels).isdisjoint(NON_REFRESHABLE_LABELS)
+    """A card is refreshable only in the pure `needs-decision` state."""
+    names = _label_names(labels)
+    return "needs-decision" in names and names.isdisjoint(NON_REFRESHABLE_LABELS)
 
 
 def plan_label_update(desired, current):
@@ -287,7 +287,7 @@ def _refresh_card(number, card, existing, item, old_state):
     return number
 
 
-def upsert_card(item):
+def upsert_card(item, existing=None):
     """Create a new card, or refresh the existing one for this target in place.
 
     Refresh rules (see AGENTS.md "Card refresh"):
@@ -303,7 +303,7 @@ def upsert_card(item):
     Returns the issue number (or the created card's URL for a brand-new card)."""
     card = render(item)
     ensure_labels(card["labels"])
-    existing = find_card(card["marker"])
+    existing = existing or find_card(card["marker"])
     if not existing:
         return _create_card(card)
 
@@ -312,7 +312,7 @@ def upsert_card(item):
         print("skip card #%s for %s: decision in flight (not pure needs-decision)"
               % (number, card["marker"]))
         return number
-    old_state = parse_state_block(existing.get("body", ""))
+    old_state = existing.get("state") or parse_state_block(existing.get("body", ""))
     if not material_changed(item, old_state):
         print("skip card #%s for %s: no material change" % (number, card["marker"]))
         return number

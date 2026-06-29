@@ -151,8 +151,11 @@ def test_is_refreshable_pure_needs_decision():
           rc.is_refreshable(labels("needs-decision", "repo:lavish-axi",
                                    "kind:pr-review", "priority:med",
                                    "target:lavish-axi-42")) is True)
-    check("guard: no labels -> refreshable", rc.is_refreshable([]) is True)
-    check("guard: None labels -> refreshable", rc.is_refreshable(None) is True)
+    check("guard: no labels -> NOT refreshable", rc.is_refreshable([]) is False)
+    check("guard: None labels -> NOT refreshable", rc.is_refreshable(None) is False)
+    check("guard: missing needs-decision -> NOT refreshable",
+          rc.is_refreshable(labels("repo:lavish-axi", "kind:pr-review",
+                                   "priority:med", "target:lavish-axi-42")) is False)
 
 
 def test_is_refreshable_blocks_mid_decision():
@@ -168,6 +171,8 @@ def test_is_refreshable_accepts_plain_strings():
     # reconcile passes label objects; defend the plain-string shape too.
     check("guard: plain-string labels handled",
           rc.is_refreshable(["needs-decision", "kind:pr-review"]) is True)
+    check("guard: plain-string labels missing needs-decision blocked",
+          rc.is_refreshable(["kind:pr-review"]) is False)
     check("guard: plain-string processing blocked",
           rc.is_refreshable(["needs-decision", "processing"]) is False)
 
