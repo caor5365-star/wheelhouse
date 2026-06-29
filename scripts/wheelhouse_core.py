@@ -6,7 +6,8 @@ Runs inside GitHub Actions. One GraphQL query per repo fetches every open
 PR/issue with compliance + test status, classifies each deterministically, and
 emits a worklist of items that need the maintainer's decision. Also carries the
 security-gated CI approval (the fork-CI / pwn-request HOLD) and the scan-time
-auto-approval of provably-safe fork-CI runs (so only risky ones raise a card).
+auto-approval of provably-safe fork-CI runs (so only risky or uncertain ones
+raise a card).
 
 This is the GHA port of `data/triage/triage.py`. What the Actions model
 replaces has been dropped: the local single-flight lock (-> Actions
@@ -14,8 +15,8 @@ replaces has been dropped: the local single-flight lock (-> Actions
 state), per-repo `owner` (-> derived from github.repository_owner).
 
 Usage:
-  wheelhouse_core.py scan                 scan all configured repos -> JSON worklist on stdout
-  wheelhouse_core.py scan <repo>          scan a single configured repo
+  wheelhouse_core.py scan                 scan all configured repos -> JSON worklist; may auto-approve safe fork CI
+  wheelhouse_core.py scan <repo>          scan a single configured repo; may auto-approve safe fork CI
   wheelhouse_core.py approve-ci <repo> <pr>   security-gated fork-CI approval (exit 4 = HOLD)
   wheelhouse_core.py checks <repo>        list distinct check names on a repo's PRs (onboarding)
   wheelhouse_core.py authorized           print true/false: is $SENDER allowed to drive decisions?
@@ -25,7 +26,8 @@ Usage:
   wheelhouse_core.py repos                list configured repos
 
 Owner is derived from $GITHUB_REPOSITORY_OWNER (or --owner). Cross-repo reads
-use the ambient GH_TOKEN (set to FLEET_TOKEN by the calling workflow step).
+and fork-CI approvals use the ambient GH_TOKEN (set to FLEET_TOKEN by the
+calling workflow step).
 """
 import base64
 import json

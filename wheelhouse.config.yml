@@ -27,6 +27,7 @@ repos:
     # Optional per-repo extras:
     merge_method: squash           # squash | merge | rebase (default: squash)
     #                              # used when you approve a "Merge it" decision
+    # auto_approve_ci: false       # optional override of the global setting
 
   # All repos below share the same contribution gate: the `no-mistakes-required.yml`
   # workflow runs a job named "PR must be raised via no-mistakes" on every PR to
@@ -92,8 +93,8 @@ nl_decisions: true
 # the queue, or rely on deep-review (phase 2) for issue triage.
 card_issues: false
 
-# Auto-approve provably-safe fork-CI runs at scan time, so only the genuinely
-# risky ones still raise an "approve CI" card for you. DEFAULT ON (this key is
+# Auto-approve provably-safe fork-CI runs at scan time, so only risky or
+# uncertain ones still raise an "approve CI" card for you. DEFAULT ON (this key is
 # absent -> treated as true), because the same security gate that holds risky
 # runs for the manual path is applied BEFORE auto-approving:
 #   * a PR that changes CI-execution files (.github/workflows, .github/actions,
