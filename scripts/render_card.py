@@ -332,7 +332,7 @@ def upsert_card(item, existing=None):
         print("skip card #%s for %s: decision in flight (not pure needs-decision)"
               % (number, card["marker"]))
         return number
-    old_state = existing.get("state") or parse_state_block(existing.get("body", ""))
+    old_state = parse_state_block(existing.get("body", ""))
     if not material_changed(item, old_state):
         print("skip card #%s for %s: no material change" % (number, card["marker"]))
         return number

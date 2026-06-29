@@ -214,6 +214,44 @@ def test_upsert_refetches_known_card_before_refresh():
     check("upsert: current processing card does not duplicate", calls["create"] == 0)
 
 
+def test_upsert_parses_state_block_after_refetch():
+    calls = {"refresh": 0, "old_state": None}
+    existing = {
+        "number": 7,
+        "body": rc.render(item())["body"],
+        "labels": labels("needs-decision", "repo:lavish-axi", "kind:pr-review",
+                         "priority:med", "target:lavish-axi-42"),
+    }
+    current = {
+        "number": 7,
+        "body": existing["body"],
+        "labels": existing["labels"],
+        "state": "OPEN",
+    }
+
+    def fake_refresh(number, card, existing_, item_, old_state):
+        calls["refresh"] += 1
+        calls["old_state"] = old_state
+        return number
+
+    old_get_card = rc.get_card
+    old_refresh = rc._refresh_card
+    old_ensure = rc.ensure_labels
+    rc.get_card = lambda number: current if int(number) == 7 else None
+    rc._refresh_card = fake_refresh
+    rc.ensure_labels = lambda labels_: None
+    try:
+        result = rc.upsert_card(item(priority="high"), existing=existing)
+    finally:
+        rc.get_card = old_get_card
+        rc._refresh_card = old_refresh
+        rc.ensure_labels = old_ensure
+
+    check("upsert: refreshable refetched card is refreshed", result == 7 and calls["refresh"] == 1)
+    check("upsert: parsed state block used instead of issue state",
+          isinstance(calls["old_state"], dict) and calls["old_state"].get("priority") == "med")
+
+
 # --------------------------------------------------------------------------- #
 # label replace: stale managed labels removed, needs-decision + human kept
 # --------------------------------------------------------------------------- #
@@ -262,6 +300,7 @@ def main():
     test_is_refreshable_blocks_mid_decision()
     test_is_refreshable_accepts_plain_strings()
     test_upsert_refetches_known_card_before_refresh()
+    test_upsert_parses_state_block_after_refetch()
     test_plan_label_update_replaces_stale_managed()
     test_plan_label_update_keeps_human_labels()
     test_plan_label_update_noop_when_identical()
