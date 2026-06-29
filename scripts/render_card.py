@@ -144,8 +144,8 @@ def material_changed(item, state):
 def _label_names(labels):
     """Normalize a `gh ... --json labels` list (objects) or a plain string list
     into a set of label names."""
-    return {l if isinstance(l, str) else l.get("name", "")
-            for l in (labels or [])}
+    return {label if isinstance(label, str) else label.get("name", "")
+            for label in (labels or [])}
 
 
 def is_refreshable(labels):
@@ -161,7 +161,7 @@ def plan_label_update(desired, current):
     current_names = _label_names(current)
     desired_set = set(desired)
     managed_now = {n for n in current_names if n.startswith(MANAGED_LABEL_PREFIXES)}
-    to_add = [l for l in desired if l not in current_names]
+    to_add = [label for label in desired if label not in current_names]
     to_remove = sorted(managed_now - desired_set)
     return to_add, to_remove
 

@@ -136,8 +136,8 @@ def test_refresh_uses_known_card_when_target_label_missing():
     check("reconcile: refresh receives known card row",
           existing is not None and existing["number"] == 7)
     check("reconcile: known row has missing target label",
-          existing is not None and all(l.get("name") != "target:wheelhouse-42"
-                                       for l in existing["labels"]))
+          existing is not None and all(label.get("name") != "target:wheelhouse-42"
+                                       for label in existing["labels"]))
     check("reconcile: no close for refreshed worklist item", calls["close"] == [])
 
 
