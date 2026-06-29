@@ -174,10 +174,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   manual gate. The verdict combines (a) **risky files** (`_risky_ci_files`: the
   PR touches `.github/workflows`/`.github/actions`/`action.yml(.yaml)` - the
   pwn-request HOLD, unchanged, fails closed) and (b) the per-repo
-  **`pull_request_target` posture** (`repo_pr_target_posture`: read the base
+  **`pull_request_target` posture** (`repo_pr_target_posture`: read the DEFAULT
   branch's `.github/workflows/*.yml|*.yaml` ONCE per repo - never per PR - and
   see whether any workflow triggers on `pull_request_target`; fails closed if the
-  workflows can't be read/parsed). A `pull_request_target` workflow that ALSO
+  workflows can't be read/parsed). Any PR whose base ref is not the repo default
+  branch fails closed (posture-present, never auto-approved). A
+  `pull_request_target` workflow that ALSO
   checks out the PR head (`_checks_out_pr_head`) is flagged LOUDLY as the exploit
   pattern (best-effort - parses jobs/steps; note the YAML 1.1 gotcha where the
   bare `on:` key parses as boolean `True`, handled in `_on_triggers`). In

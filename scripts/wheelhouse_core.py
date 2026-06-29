@@ -53,12 +53,13 @@ CONFIG_CANDIDATES = [
 GQL = """
 query($owner:String!, $name:String!) {
   repository(owner:$owner, name:$name) {
+    defaultBranchRef { name }
     pullRequests(states:OPEN, first:100, orderBy:{field:UPDATED_AT, direction:DESC}) {
       totalCount
       nodes {
         number title isDraft updatedAt changedFiles
         author { login }
-        headRefName headRefOid
+        headRefName headRefOid baseRefName
         labels(first:20){ nodes{ name } }
         closingIssuesReferences(first:10){ nodes{ number } }
         commits(last:1){ nodes{ commit{ statusCheckRollup{
@@ -297,11 +298,34 @@ def _auto_approve_enabled(repo_cfg, global_default):
     return global_default if v is None else bool(v)
 
 
+def _display_list(values, limit=10):
+    items = [str(v) for v in (values or [])]
+    if len(items) <= limit:
+        return ", ".join(items)
+    return "%s (+%d more; %d total)" % (", ".join(items[:limit]), len(items) - limit, len(items))
+
+
+def _non_default_base_posture(base_ref, default_branch):
+    base = str(base_ref or "").strip()
+    default = str(default_branch or "").strip()
+    if base and default and base == default:
+        return None
+    return {"pr_target": True, "exploit": False, "error": True,
+            "non_default_base": True, "base_ref": base, "default_branch": default}
+
+
 def _ci_safety_note(verdict):
     """A human warning for a ci-approval CARD (the not-auto-approved path), so
     the maintainer decides with eyes open. Loudest signal first."""
     parts = []
-    if verdict.get("exploit"):
+    if verdict.get("non_default_base"):
+        base = verdict.get("base_ref") or "<unknown>"
+        default = verdict.get("default_branch") or "<unknown>"
+        parts.append("This PR targets base branch `%s`, but the repo default is `%s`. "
+                     "Wheelhouse only auto-checks `pull_request_target` posture on the "
+                     "default branch, so it fails closed and raises a card for manual review."
+                     % (base, default))
+    elif verdict.get("exploit"):
         parts.append("DANGER (pwn-request): a `pull_request_target` workflow on the base branch "
                      "checks out this PR's head, so running fork CI could execute attacker-controlled "
                      "code with repo secrets. Review the diff with extreme care before approving.")
@@ -313,7 +337,7 @@ def _ci_safety_note(verdict):
     if verdict.get("risky_files"):
         parts.append("This PR changes CI-execution files (%s); approving would run the PR's OWN "
                      "workflow/action code, so it is held for manual review."
-                     % ", ".join(verdict["risky_files"]))
+                     % _display_list(verdict["risky_files"]))
     return " ".join(parts)
 
 
@@ -363,6 +387,7 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
 
     prs = data["pullRequests"]["nodes"]
     issues = data["issues"]["nodes"]
+    default_branch = ((data.get("defaultBranchRef") or {}).get("name") or "").strip()
     all_names = set()
     enriched = []
     closing = {}  # issue -> [pr numbers]
@@ -379,13 +404,14 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
             "comp": comp, "tests": tests, "ci": ci, "bucket": bucket,
             "closes": closes, "head_sha": pr["headRefOid"],
             "changed_files": pr.get("changedFiles"),
+            "base_ref": pr.get("baseRefName"),
         })
 
     open_issue_numbers = [it["number"] for it in issues]
     addressed = {n for n in closing if n in set(open_issue_numbers)}
 
     auto_enabled = _auto_approve_enabled(repo_cfg, auto_approve_ci)
-    posture = None  # the repo's pull_request_target posture, read lazily once.
+    default_posture = None
 
     items = []
     for pr in enriched:
@@ -407,8 +433,11 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
         }
 
         if kind == "ci-approval":
-            if posture is None:  # read the repo's workflows once, reuse per PR.
-                posture = repo_pr_target_posture(slug)
+            posture = _non_default_base_posture(pr.get("base_ref"), default_branch)
+            if posture is None:
+                if default_posture is None:
+                    default_posture = repo_pr_target_posture(slug)
+                posture = default_posture
             handled, note = _auto_approve_or_card(owner, name, pr["number"], posture,
                                                   auto_enabled, pr.get("changed_files"))
             if handled:
@@ -614,11 +643,12 @@ def _fetch_workflow_text(slug, path):
 
 
 def repo_pr_target_posture(slug):
-    """The source repo's `pull_request_target` posture, computed ONCE per repo
-    (read `.github/workflows/*.yml|*.yaml` via the API; reuse for all its PRs).
+    """The source repo's default-branch `pull_request_target` posture, computed
+    ONCE per repo (read `.github/workflows/*.yml|*.yaml` via the API; reuse for
+    PRs whose base is the repo default branch).
 
     Returns {pr_target, exploit, error}:
-      * pr_target - a base-branch workflow triggers on `pull_request_target`
+      * pr_target - a default-branch workflow triggers on `pull_request_target`
         (which runs in the repo context WITH secrets).
       * exploit   - one of those workflows also checks out the PR head (the
         pwn-request supply-chain pattern) - flagged loudly, best-effort.
@@ -659,6 +689,9 @@ def ci_safety(slug, pr, repo_posture, changed_files=None):
     pr_target = bool(repo_posture.get("pr_target"))
     exploit = bool(repo_posture.get("exploit"))
     posture_error = bool(repo_posture.get("error"))
+    non_default_base = bool(repo_posture.get("non_default_base"))
+    base_ref = repo_posture.get("base_ref") or ""
+    default_branch = repo_posture.get("default_branch") or ""
 
     files, ok, complete = _list_pr_files(slug, pr, changed_files)
     if not ok:
@@ -679,8 +712,11 @@ def ci_safety(slug, pr, repo_posture, changed_files=None):
     else:
         bits = []
         if risky:
-            bits.append("touches CI-execution files (%s)" % ", ".join(risky))
-        if pr_target:
+            bits.append("touches CI-execution files (%s)" % _display_list(risky))
+        if non_default_base:
+            bits.append("targets base branch `%s`, not repo default `%s` (failing closed)"
+                        % (base_ref or "<unknown>", default_branch or "<unknown>"))
+        elif pr_target:
             bits.append("base branch runs a pull_request_target workflow"
                         + (" (workflows unreadable - failing closed)" if posture_error else ""))
         if exploit:
@@ -688,13 +724,21 @@ def ci_safety(slug, pr, repo_posture, changed_files=None):
         reason = "; ".join(bits) or "fail-closed"
 
     return {"safe": safe, "error": error, "risky_files": risky,
-            "pr_target": pr_target, "exploit": exploit, "reason": reason}
+            "pr_target": pr_target, "exploit": exploit, "reason": reason,
+            "non_default_base": non_default_base, "base_ref": base_ref,
+            "default_branch": default_branch}
 
 
 def _approve_warning_suffix(verdict):
     """The pull_request_target / exploit warning appended to an approve response
     so the maintainer acts with eyes open (the manual path does NOT block on
     posture - the pull_request_target run fires automatically regardless)."""
+    if verdict.get("non_default_base"):
+        base = verdict.get("base_ref") or "<unknown>"
+        default = verdict.get("default_branch") or "<unknown>"
+        return ("  NOTE: this PR targets base branch `%s`, but the repo default is `%s`; "
+                "Wheelhouse fails closed for non-default bases and this approval only clears "
+                "the read-only fork pull_request run." % (base, default))
     if verdict.get("exploit"):
         return ("  DANGER: a pull_request_target workflow on the base branch checks out this PR's "
                 "head (pwn-request pattern); it runs with repo secrets regardless of this approval - "
@@ -752,13 +796,19 @@ def approve_ci(owner, repo, pr, posture=None):
     except ValueError:
         return ("error", "pr fetch returned invalid JSON")
     head = pr_data.get("head") or {}
+    base = pr_data.get("base") or {}
     head_ref = str(head.get("ref") or "")
     head_sha = str(head.get("sha") or "")
     if not head_ref or not head_sha:
         return ("error", "pr fetch returned missing head ref/sha")
     changed_files = pr_data.get("changed_files")
+    base_ref = str(base.get("ref") or "")
+    default_branch = str(((base.get("repo") or {}).get("default_branch")) or "")
 
-    if posture is None:
+    base_posture = _non_default_base_posture(base_ref, default_branch)
+    if base_posture is not None:
+        posture = base_posture
+    elif posture is None:
         posture = repo_pr_target_posture(slug)
     verdict = ci_safety(slug, pr, posture, changed_files)
 
@@ -769,7 +819,7 @@ def approve_ci(owner, repo, pr, posture=None):
         return ("hold",
                 "SECURITY HOLD: #%s changes CI-execution files - NOT auto-approving. Approving fork "
                 "CI would run the PR's OWN workflow/action code with repo perms. Needs manual review: %s"
-                % (pr, ", ".join(verdict["risky_files"])))
+                % (pr, _display_list(verdict["risky_files"])))
 
     warn = _approve_warning_suffix(verdict)
 

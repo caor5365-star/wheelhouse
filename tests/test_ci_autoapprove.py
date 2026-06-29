@@ -119,6 +119,16 @@ def test_ci_safety_posture_read_error_fails_closed():
     check("ci_safety: posture read error -> error flag", v["error"] is True)
 
 
+def test_ci_safety_note_caps_risky_file_list():
+    risky = [".github/workflows/%02d.yml" % i for i in range(12)]
+    note = core._ci_safety_note({"risky_files": risky, "pr_target": False, "exploit": False})
+    check("ci-safety-note: first risky file is shown", risky[0] in note)
+    check("ci-safety-note: tenth risky file is shown", risky[9] in note)
+    check("ci-safety-note: extra risky files are summarized", "(+2 more; 12 total)" in note)
+    check("ci-safety-note: eleventh risky file is not rendered", risky[10] not in note)
+    check("ci-safety-note: twelfth risky file is not rendered", risky[11] not in note)
+
+
 # --------------------------------------------------------------------------- #
 # pure trigger / exploit-pattern helpers
 # --------------------------------------------------------------------------- #
@@ -243,20 +253,22 @@ def rollup(contexts):
     return {"state": "PENDING", "contexts": {"nodes": contexts}}
 
 
-def pr_node(number, status_rollup, draft=False):
+def pr_node(number, status_rollup, draft=False, base_ref="main"):
     return {
         "number": number, "title": "PR %d" % number, "isDraft": draft,
         "updatedAt": "2026-01-01T00:00:00Z", "changedFiles": 1,
         "author": {"login": "contributor"},
         "headRefName": "feature-%d" % number, "headRefOid": "sha%d" % number,
+        "baseRefName": base_ref,
         "labels": {"nodes": []},
         "closingIssuesReferences": {"nodes": []},
         "commits": {"nodes": [{"commit": {"statusCheckRollup": status_rollup}}]},
     }
 
 
-def graphql_data(pr_nodes):
+def graphql_data(pr_nodes, default_branch="main"):
     return {
+        "defaultBranchRef": {"name": default_branch},
         "pullRequests": {"totalCount": len(pr_nodes), "nodes": pr_nodes},
         "issues": {"totalCount": 0, "nodes": []},
     }
@@ -268,7 +280,7 @@ SAFE_VERDICT = {"safe": True, "error": False, "risky_files": [],
 
 def run_build_repo(pr_nodes, *, auto_approve_ci=True, repo_over=None, posture_value=None,
                    verdict=None, approve_result=("approved", "approved 1 run"),
-                   approve_raises=False, graphql_raises=False):
+                   approve_raises=False, graphql_raises=False, default_branch="main"):
     """Drive build_repo with the network-touching dependencies stubbed."""
     calls = {"approve": [], "posture": 0, "safety": []}
     repo_cfg = {"name": "demo", "compliance_check": "Gate", "test_check_patterns": ["test"]}
@@ -278,14 +290,16 @@ def run_build_repo(pr_nodes, *, auto_approve_ci=True, repo_over=None, posture_va
     def fake_graphql(owner, name):
         if graphql_raises:
             raise RuntimeError("boom")
-        return graphql_data(pr_nodes)
+        return graphql_data(pr_nodes, default_branch)
 
     def fake_posture(slug):
         calls["posture"] += 1
         return CLEAN_POSTURE if posture_value is None else posture_value
 
     def fake_ci_safety(slug, pr, repo_posture, changed_files=None):
-        calls["safety"].append((slug, pr))
+        calls["safety"].append((slug, pr, repo_posture, changed_files))
+        if callable(verdict):
+            return verdict(slug, pr, repo_posture, changed_files)
         return SAFE_VERDICT if verdict is None else verdict
 
     def fake_approve(owner, name, pr, posture=None):
@@ -305,8 +319,8 @@ def run_build_repo(pr_nodes, *, auto_approve_ci=True, repo_over=None, posture_va
     return result, items, calls
 
 
-def needs_ci_pr(number=1):
-    return pr_node(number, None)  # no status rollup -> ci absent -> needs-ci-approval
+def needs_ci_pr(number=1, base_ref="main"):
+    return pr_node(number, None, base_ref=base_ref)  # no status rollup -> ci absent -> needs-ci-approval
 
 
 def test_safe_pr_is_auto_approved_no_card():
@@ -396,6 +410,25 @@ def test_truncated_pr_file_list_routes_to_card():
           "could-not-list-all-files" in (items[0].get("warning") or ""))
 
 
+def test_non_default_base_pr_raises_card_without_posture_read():
+    save = core._list_pr_files
+    real_ci_safety = core.ci_safety
+    core._list_pr_files = lambda slug, pr, expected_count: ([], True, True)
+    try:
+        result, items, calls = run_build_repo([needs_ci_pr(base_ref="release")],
+                                              verdict=real_ci_safety)
+    finally:
+        core._list_pr_files = save
+    check("route: non-default-base PR raises a ci-approval card",
+          len(items) == 1 and items[0]["kind"] == "ci-approval")
+    check("route: non-default-base PR is NOT auto-approved", calls["approve"] == [])
+    check("route: non-default-base PR skips default-branch posture read", calls["posture"] == 0)
+    check("route: non-default-base card warns about the base branch",
+          "release" in (items[0].get("warning") or "") and "main" in (items[0].get("warning") or ""))
+    check("route: non-default-base verdict is posture-present",
+          calls["safety"] and calls["safety"][0][2].get("non_default_base") is True)
+
+
 def test_approve_failure_falls_back_to_card():
     result, items, calls = run_build_repo([needs_ci_pr()], approve_result=("error", "api fail"))
     check("route: approve error falls back to a card (nothing lost)", len(items) == 1)
@@ -421,17 +454,22 @@ def test_approve_exception_falls_back_to_card():
     check("route: approve was attempted", len(calls["approve"]) == 1)
 
 
-def run_approve_ci(run_list_result, approval_results=None, run_details=None):
+def run_approve_ci(run_list_result, approval_results=None, run_details=None,
+                   pr_data=None, stub_safety=True, safety_verdict=None):
     approval_results = list(approval_results or [])
     run_details = run_details or {}
     calls = {"approved": [], "run_list": []}
+    pr_payload = pr_data or {"head": {"ref": "feature", "sha": "sha1"},
+                             "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                             "changed_files": 0}
+    safety_verdict = safety_verdict or SAFE_VERDICT
 
     def fake_run(cmd, capture_output=True, text=True):
         calls.setdefault("commands", []).append(cmd)
         if cmd[:3] == ["gh", "api", "/repos/o/r/pulls/1"]:
-            return SimpleNamespace(returncode=0,
-                                   stdout=json.dumps({"head": {"ref": "feature", "sha": "sha1"}}),
-                                   stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(pr_payload), stderr="")
+        if cmd[:3] == ["gh", "api", "--paginate"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if cmd[:3] == ["gh", "run", "list"]:
             calls["run_list"].append(cmd)
             return run_list_result
@@ -451,7 +489,8 @@ def run_approve_ci(run_list_result, approval_results=None, run_details=None):
 
     save = (core.subprocess.run, core.ci_safety)
     core.subprocess.run = fake_run
-    core.ci_safety = lambda slug, pr, posture, changed_files=None: SAFE_VERDICT
+    if stub_safety:
+        core.ci_safety = lambda slug, pr, posture, changed_files=None: safety_verdict
     try:
         status, message = core.approve_ci("o", "r", "1", posture=CLEAN_POSTURE)
         return status, message, calls
@@ -484,6 +523,17 @@ def test_approve_ci_any_failed_post_returns_error():
                                             approvals)
     check("approve_ci: any failed approval POST -> error", status == "error")
     check("approve_ci: failed approval POST is named", "Lint:forbidden" in message)
+
+
+def test_approve_ci_hold_message_caps_risky_file_list():
+    risky = [".github/workflows/%02d.yml" % i for i in range(12)]
+    verdict = {"safe": False, "error": False, "risky_files": risky,
+               "pr_target": False, "exploit": False, "reason": "risky"}
+    status, message, calls = run_approve_ci(SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+                                            safety_verdict=verdict)
+    check("approve_ci: risky-file verdict still holds", status == "hold")
+    check("approve_ci: risky hold summarizes extra files", "(+2 more; 12 total)" in message)
+    check("approve_ci: risky hold does not render the eleventh file", risky[10] not in message)
 
 
 def test_approve_ci_filters_to_current_pr_head_and_number():
@@ -522,6 +572,24 @@ def test_approve_ci_run_detail_failure_returns_error():
         SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""), [], {"101": "error"})
     check("approve_ci: run-detail failure -> error", status == "error")
     check("approve_ci: run-detail failure does not approve", calls["approved"] == [])
+
+
+def test_approve_ci_non_default_base_warns_without_posture_read():
+    runs = [{"databaseId": 101, "workflowName": "CI"}]
+    approvals = [SimpleNamespace(returncode=0, stdout="", stderr="")]
+    pr_data = {"head": {"ref": "feature", "sha": "sha1"},
+               "base": {"ref": "release", "repo": {"default_branch": "main"}},
+               "changed_files": 0}
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
+        approvals,
+        {"101": {"head_sha": "sha1", "pull_requests": [{"number": 1}]}},
+        pr_data=pr_data,
+        stub_safety=False)
+    check("approve_ci: non-default-base manual approval can proceed", status == "approved")
+    check("approve_ci: non-default-base manual approval warns",
+          "release" in message and "main" in message)
+    check("approve_ci: non-default-base approval reaches matching run", calls["approved"] == ["101"])
 
 
 def test_opt_out_global_disables_auto_approve():
@@ -621,6 +689,7 @@ def main():
     test_ci_safety_pr_target_posture_blocks_auto()
     test_ci_safety_exploit_flag_passthrough()
     test_ci_safety_posture_read_error_fails_closed()
+    test_ci_safety_note_caps_risky_file_list()
     test_on_triggers_handles_every_form_and_yaml_gotcha()
     test_checks_out_pr_head()
     test_posture_no_workflows_dir_is_clean()
@@ -635,6 +704,7 @@ def main():
     test_exploit_pattern_card_warns_loudly()
     test_ci_safety_error_raises_card()
     test_truncated_pr_file_list_routes_to_card()
+    test_non_default_base_pr_raises_card_without_posture_read()
     test_approve_failure_falls_back_to_card()
     test_approve_noop_falls_back_to_card()
     test_approve_hold_falls_back_to_card()
@@ -642,9 +712,11 @@ def main():
     test_approve_ci_run_list_failure_returns_error()
     test_approve_ci_invalid_run_list_returns_error()
     test_approve_ci_any_failed_post_returns_error()
+    test_approve_ci_hold_message_caps_risky_file_list()
     test_approve_ci_filters_to_current_pr_head_and_number()
     test_approve_ci_no_matching_runs_returns_noop_without_approving()
     test_approve_ci_run_detail_failure_returns_error()
+    test_approve_ci_non_default_base_warns_without_posture_read()
     test_opt_out_global_disables_auto_approve()
     test_opt_out_card_still_carries_pr_target_warning()
     test_per_repo_override_disables_auto_approve()
