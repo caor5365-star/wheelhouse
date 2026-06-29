@@ -110,6 +110,27 @@ def test_token_absent_message():
           any("missing token" in n.lower() for n in names))
 
 
+def test_workflow_dispatch_gate_restricts_bot_reruns():
+    doc = load_yaml(".github", "workflows", "deep-review.yml")
+    gate = str(doc["jobs"]["deep-review"].get("if", ""))
+    squashed = " ".join(gate.split())
+
+    check("workflow: workflow_dispatch accepts the owner actor",
+          "github.actor == github.repository_owner" in gate)
+    check("workflow: workflow_dispatch accepts owner-triggered reruns",
+          "github.triggering_actor == github.repository_owner" in gate)
+    check("workflow: workflow_dispatch bot arm checks the triggering actor",
+          "github.actor == 'github-actions[bot]'" in gate
+          and "github.triggering_actor == 'github-actions[bot]'" in gate)
+    check("workflow: bot arm is conjunctive, not actor-only",
+          "github.actor == 'github-actions[bot]' && "
+          "( github.triggering_actor == 'github-actions[bot]' || "
+          "github.triggering_actor == github.repository_owner )" in squashed)
+    check("workflow: manual needs-deep-review label arm remains owner-only",
+          "github.event.label.name == 'needs-deep-review'" in gate
+          and "github.event.sender.login == github.repository_owner" in gate)
+
+
 # --------------------------------------------------------------------------- #
 # code-grounded + security model
 # --------------------------------------------------------------------------- #
@@ -253,6 +274,7 @@ def main():
     test_investigate_rendered_per_kind()
     test_enable_flag_removed()
     test_token_absent_message()
+    test_workflow_dispatch_gate_restricts_bot_reruns()
     test_code_grounded_checkout_and_tool_isolation()
     test_workflow_dispatch_uses_immutable_target_inputs()
     test_handler_investigate_wiring()

@@ -65,15 +65,21 @@ jobs:
     # workflow_dispatch path is GitHub-restricted to write-access users already,
     # and the only programmatic caller is decision-handler.yml's owner-gated
     # "Investigate" step (which dispatches via github.token, so it appears as the
-    # `github-actions[bot]` actor) - so accept the owner or that bot, never an
-    # arbitrary collaborator.
+    # `github-actions[bot]` actor) - so accept the owner or a bot run triggered
+    # by the bot or owner, never an arbitrary collaborator.
     if: >
       (
         github.event_name == 'workflow_dispatch' &&
         (
           github.actor == github.repository_owner ||
           github.triggering_actor == github.repository_owner ||
-          github.actor == 'github-actions[bot]'
+          (
+            github.actor == 'github-actions[bot]' &&
+            (
+              github.triggering_actor == 'github-actions[bot]' ||
+              github.triggering_actor == github.repository_owner
+            )
+          )
         )
       ) ||
       (
