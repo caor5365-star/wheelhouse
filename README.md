@@ -9,6 +9,9 @@ No server, no database, no bot to host - just this repo and a couple of secrets.
 
 This repo is a **template**: fork it (or "Use this template"), edit one config file, add one secret, and you have your own Wheelhouse.
 
+Changing the Wheelhouse codebase itself goes through [`CONTRIBUTING.md`](CONTRIBUTING.md).
+PRs to `main` must be raised by `git push no-mistakes`, which writes the signature checked by the **"PR must be raised via no-mistakes"** workflow.
+
 ## How it works
 
 - **The queue is the issue list.** Each open issue is one decision that needs you. Open = pending, closed = consumed.
@@ -164,6 +167,7 @@ The scheduled backstop also self-heals: if the underlying PR/issue gets merged o
 ## Repo layout
 
 ```
+CONTRIBUTING.md               how to submit changes to Wheelhouse itself
 wheelhouse.config.yml          the one file you edit
 .github/ISSUE_TEMPLATE/
   wheelhouse-decision.yml      schema for the machine-rendered cards (lets issue-ops/parser read the checkboxes)
@@ -172,6 +176,7 @@ wheelhouse.config.yml          the one file you edit
   decision-handler.yml         your tick / slash-command / plain-English reply -> execute on the target -> close the card
   scan-backstop.yml            scheduled scan -> reconcile the queue against live repo state
   deep-review.yml              (LLM side-job, inert) label -> Claude reviews the target -> comments back
+  no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
   wheelhouse_core.py           GraphQL scan, classify, dedup/overlap, security-gated CI approval
   render_card.py               build the decision card; create/update/close cards in this repo

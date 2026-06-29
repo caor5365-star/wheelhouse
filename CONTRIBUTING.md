@@ -32,6 +32,20 @@ Before pushing, validate locally:
 ```
 python -m py_compile scripts/*.py tests/*.py
 python tests/test_decision.py
+python - <<'PY'
+from pathlib import Path
+import yaml
+
+for pattern in (".github/workflows/*.yml", ".github/ISSUE_TEMPLATE/*.yml", "wheelhouse.config.yml"):
+    for path in sorted(Path(".").glob(pattern)):
+        with path.open() as fh:
+            yaml.safe_load(fh)
+PY
+```
+
+If `actionlint` is available, also run:
+
+```
 actionlint .github/workflows/*.yml
 ```
 
