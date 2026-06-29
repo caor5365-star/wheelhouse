@@ -509,17 +509,26 @@ def cmd_checks(repo):
         print("!! " + w)
 
 
-def cmd_authorized():
-    """Print true/false: may $SENDER drive decisions on this machine?"""
-    sender = os.environ.get("SENDER", "").strip()
+def maintainers():
+    """The set of logins allowed to drive decisions: the repo owner (from
+    $OWNER / $GITHUB_REPOSITORY_OWNER) plus the optional configured `maintainer`.
+
+    This is the SINGLE source of truth for "who is the maintainer" - the gate
+    (`authorized`) and the natural-language conversation-history filter both use
+    it, so trusted-author rules never drift apart."""
     owner = (os.environ.get("OWNER", "") or os.environ.get("GITHUB_REPOSITORY_OWNER", "")).strip()
     maintainer = ""
     try:
         maintainer = load_config()["maintainer"]
     except SystemExit:
         pass
-    allowed = {x for x in (owner, maintainer) if x}
-    print("true" if sender and sender in allowed else "false")
+    return {x for x in (owner, maintainer) if x}
+
+
+def cmd_authorized():
+    """Print true/false: may $SENDER drive decisions on this machine?"""
+    sender = os.environ.get("SENDER", "").strip()
+    print("true" if sender and sender in maintainers() else "false")
 
 
 def cmd_repos():

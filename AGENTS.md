@@ -77,10 +77,27 @@ by GitHub Actions. This file holds durable, project-intrinsic notes.
 - Token discipline per step: scan/execute and the read-only target fetch for the
   LLM (`deep-review` prepare, decision-handler `nl-fetch`) use `FLEET_TOKEN`; all
   card writes - including every `issue-ops/labeler` step (its `github_token`
-  defaults to `github.token`, passed explicitly here) - use `github.token`.
-  Mixing them either breaks cross-repo acting or creates a re-trigger loop. The
-  LLM step itself never gets `FLEET_TOKEN`; target content reaches it only as
-  pre-fetched, delimited untrusted data inside the prompt.
+  defaults to `github.token`, passed explicitly here) - use `github.token`. The
+  card's own comment thread is also this repo's data, so the NL `nl-comments`
+  fetch uses `github.token`, NOT `FLEET_TOKEN`. Mixing them either breaks
+  cross-repo acting or creates a re-trigger loop. The LLM step itself never gets
+  `FLEET_TOKEN`; target content reaches it only as pre-fetched, delimited
+  untrusted data inside the prompt.
+- NL conversation memory is owner-scoped, and the scoping IS the security
+  boundary. `decision-handler.yml` fetches the card's thread (`nl-comments`,
+  `github.token`) and `apply_decision.py assemble_history` renders it as a
+  "Conversation so far" block of trusted context - but ONLY comments authored by
+  a maintainer or by the workflow bot (`github-actions[bot]`, the assistant's own
+  prior turns) survive. The maintainer set is exactly `triage_core.maintainers()`
+  (repo owner + optional configured `maintainer`) - the SAME notion the
+  `gate`/`authorized` path uses; do not invent a second rule. Every other author
+  (a contributor, a third-party bot) is dropped ENTIRELY so non-owner text can
+  never enter the LLM's instruction context. The triggering comment is excluded
+  from history by id (`github.event.comment.id`) because it is still passed
+  separately as the single new instruction; the history is context only. None of
+  this widens the trust model: the LLM is still `--allowedTools Write`, still gets
+  only this repo's token (never `FLEET_TOKEN`), and `nl-route`'s allowlist
+  re-validation is unchanged.
 - `triage_core.py scan` is resilient: a repo that fails to read is reported as a
   warning (`ok:false`) and skipped, and `reconcile.py` must never close cards for
   an `ok:false` repo (state unknown).
@@ -100,7 +117,10 @@ repo's token):
   mapped to a structured intent (see Sharp edges). Inert unless
   `nl_decisions: true` AND `CLAUDE_CODE_OAUTH_TOKEN` present. Claude is restricted
   to the `Write` tool (`claude_args: --allowedTools Write`) - it writes
-  `decision.json` and runs no commands.
+  `decision.json` and runs no commands. The prompt carries the card's prior
+  thread as owner-scoped conversation history so follow-up questions keep
+  continuity (see the conversation-memory bullet in Sharp edges for the
+  trusted-author rule).
 
 ## Validation
 
