@@ -349,6 +349,14 @@ def test_approve_failure_falls_back_to_card():
     check("route: approve was attempted before falling back", len(calls["approve"]) == 1)
 
 
+def test_approve_noop_falls_back_to_card():
+    result, items, calls = run_build_repo([needs_ci_pr()],
+                                          approve_result=("noop", "no matching runs"))
+    check("route: approve noop falls back to a card (nothing lost)", len(items) == 1)
+    check("route: approve noop note is surfaced",
+          "auto-approve did not complete" in (items[0].get("warning") or ""))
+
+
 def test_approve_hold_falls_back_to_card():
     result, items, calls = run_build_repo([needs_ci_pr()], approve_result=("hold", "held"))
     check("route: approve hold falls back to a card", len(items) == 1)
@@ -360,35 +368,52 @@ def test_approve_exception_falls_back_to_card():
     check("route: approve was attempted", len(calls["approve"]) == 1)
 
 
-def run_approve_ci(run_list_result, approval_results=None):
+def run_approve_ci(run_list_result, approval_results=None, run_details=None):
     approval_results = list(approval_results or [])
+    run_details = run_details or {}
+    calls = {"approved": [], "run_list": []}
 
     def fake_run(cmd, capture_output=True, text=True):
+        calls.setdefault("commands", []).append(cmd)
         if cmd[:3] == ["gh", "api", "/repos/o/r/pulls/1"]:
-            return SimpleNamespace(returncode=0, stdout=json.dumps({"head": {"ref": "feature"}}), stderr="")
+            return SimpleNamespace(returncode=0,
+                                   stdout=json.dumps({"head": {"ref": "feature", "sha": "sha1"}}),
+                                   stderr="")
         if cmd[:3] == ["gh", "run", "list"]:
+            calls["run_list"].append(cmd)
             return run_list_result
         if cmd[:3] == ["gh", "api", "--method"]:
+            calls["approved"].append(cmd[-1].rsplit("/", 2)[-2])
             return approval_results.pop(0)
+        if cmd[:2] == ["gh", "api"] and "/actions/runs/" in cmd[2]:
+            rid = cmd[2].rsplit("/", 1)[-1]
+            detail = run_details.get(str(rid),
+                                     {"head_sha": "sha1", "pull_requests": [{"number": 1}]})
+            if detail == "error":
+                return SimpleNamespace(returncode=1, stdout="", stderr="detail failed")
+            if detail == "invalid-json":
+                return SimpleNamespace(returncode=0, stdout="not-json", stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(detail), stderr="")
         raise AssertionError(cmd)
 
     save = (core.subprocess.run, core.ci_safety)
     core.subprocess.run = fake_run
     core.ci_safety = lambda slug, pr, posture: SAFE_VERDICT
     try:
-        return core.approve_ci("o", "r", "1", posture=CLEAN_POSTURE)
+        status, message = core.approve_ci("o", "r", "1", posture=CLEAN_POSTURE)
+        return status, message, calls
     finally:
         core.subprocess.run, core.ci_safety = save
 
 
 def test_approve_ci_run_list_failure_returns_error():
-    status, message = run_approve_ci(SimpleNamespace(returncode=1, stdout="", stderr="rate limited"))
+    status, message, calls = run_approve_ci(SimpleNamespace(returncode=1, stdout="", stderr="rate limited"))
     check("approve_ci: run-list failure -> error", status == "error")
     check("approve_ci: run-list failure mentions cause", "rate limited" in message)
 
 
 def test_approve_ci_invalid_run_list_returns_error():
-    status, message = run_approve_ci(SimpleNamespace(returncode=0, stdout="not-json", stderr=""))
+    status, message, calls = run_approve_ci(SimpleNamespace(returncode=0, stdout="not-json", stderr=""))
     check("approve_ci: invalid run-list JSON -> error", status == "error")
     check("approve_ci: invalid run-list JSON mentions cause", "invalid JSON" in message)
 
@@ -402,10 +427,48 @@ def test_approve_ci_any_failed_post_returns_error():
         SimpleNamespace(returncode=0, stdout="", stderr=""),
         SimpleNamespace(returncode=1, stdout="", stderr="forbidden"),
     ]
-    status, message = run_approve_ci(SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
-                                     approvals)
+    status, message, calls = run_approve_ci(SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
+                                            approvals)
     check("approve_ci: any failed approval POST -> error", status == "error")
     check("approve_ci: failed approval POST is named", "Lint:forbidden" in message)
+
+
+def test_approve_ci_filters_to_current_pr_head_and_number():
+    runs = [
+        {"databaseId": 101, "workflowName": "Old"},
+        {"databaseId": 102, "workflowName": "Other PR"},
+        {"databaseId": 103, "workflowName": "Current"},
+    ]
+    details = {
+        "101": {"head_sha": "oldsha", "pull_requests": [{"number": 1}]},
+        "102": {"head_sha": "sha1", "pull_requests": [{"number": 2}]},
+        "103": {"head_sha": "sha1", "pull_requests": [{"number": 1}]},
+    }
+    approvals = [SimpleNamespace(returncode=0, stdout="", stderr="")]
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""), approvals, details)
+    check("approve_ci: only matching PR/head run is approved", calls["approved"] == ["103"])
+    check("approve_ci: matching run approval succeeds", status == "approved")
+    cmd = calls["run_list"][0]
+    check("approve_ci: run list is filtered by commit", "--commit" in cmd and "sha1" in cmd)
+
+
+def test_approve_ci_no_matching_runs_returns_noop_without_approving():
+    runs = [{"databaseId": 101, "workflowName": "Old"}]
+    details = {"101": {"head_sha": "oldsha", "pull_requests": [{"number": 1}]}}
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""), [], details)
+    check("approve_ci: no matching runs -> noop", status == "noop")
+    check("approve_ci: no matching runs -> no approval POST", calls["approved"] == [])
+    check("approve_ci: no matching runs message mentions skipped", "skipped" in message)
+
+
+def test_approve_ci_run_detail_failure_returns_error():
+    runs = [{"databaseId": 101, "workflowName": "CI"}]
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""), [], {"101": "error"})
+    check("approve_ci: run-detail failure -> error", status == "error")
+    check("approve_ci: run-detail failure does not approve", calls["approved"] == [])
 
 
 def test_opt_out_global_disables_auto_approve():
@@ -518,11 +581,15 @@ def main():
     test_exploit_pattern_card_warns_loudly()
     test_ci_safety_error_raises_card()
     test_approve_failure_falls_back_to_card()
+    test_approve_noop_falls_back_to_card()
     test_approve_hold_falls_back_to_card()
     test_approve_exception_falls_back_to_card()
     test_approve_ci_run_list_failure_returns_error()
     test_approve_ci_invalid_run_list_returns_error()
     test_approve_ci_any_failed_post_returns_error()
+    test_approve_ci_filters_to_current_pr_head_and_number()
+    test_approve_ci_no_matching_runs_returns_noop_without_approving()
+    test_approve_ci_run_detail_failure_returns_error()
     test_opt_out_global_disables_auto_approve()
     test_opt_out_card_still_carries_pr_target_warning()
     test_per_repo_override_disables_auto_approve()

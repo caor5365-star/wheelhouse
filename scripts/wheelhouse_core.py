@@ -321,8 +321,8 @@ def _auto_approve_or_card(owner, name, pr_number, posture, auto_enabled):
     """For one `needs-ci-approval` PR, decide auto-approve vs card.
 
     Returns (handled, note) where:
-      * handled=True  -> the run was auto-approved (or there was nothing to
-        approve); emit NO card. `note` is the audit line.
+      * handled=True  -> the run was auto-approved; emit NO card. `note` is the
+        audit line.
       * handled=False -> raise a card; `note` is the safety warning to surface on
         it (may be "").
     Fails CLOSED: any uncertainty (unsafe verdict, hold, approve error/exception)
@@ -333,11 +333,13 @@ def _auto_approve_or_card(owner, name, pr_number, posture, auto_enabled):
             status, message = approve_ci(owner, name, str(pr_number), posture=posture)
         except Exception as e:  # an approve that throws must fall back to a card
             status, message = ("error", "auto-approve raised: %s" % str(e)[:160])
-        if status in ("approved", "noop"):
+        if status == "approved":
             return (True, "auto-approved (%s): %s" % (verdict["reason"], message))
         # hold / error -> fall through to a card (fail-closed), keeping the why.
-        note = ("auto-approve did not complete (%s: %s); %s"
-                % (status, message, _ci_safety_note(verdict))).strip()
+        note = "auto-approve did not complete (%s: %s)" % (status, message)
+        card_note = _ci_safety_note(verdict)
+        if card_note:
+            note += "; " + card_note
         return (False, note)
     return (False, _ci_safety_note(verdict))
 
@@ -689,6 +691,29 @@ def _approve_warning_suffix(verdict):
     return ""
 
 
+def _workflow_run_matches_pr(slug, run_id, pr, head_sha):
+    r = _gh_api_capture("/repos/%s/actions/runs/%s" % (slug, run_id))
+    if r.returncode != 0:
+        return (None, "run detail fetch failed: %s" % r.stderr.strip()[:160])
+    try:
+        run = json.loads(r.stdout)
+    except ValueError:
+        return (None, "run detail returned invalid JSON")
+    run_head = str(run.get("head_sha") or "")
+    if run_head != str(head_sha):
+        return (False, "head %s" % (run_head[:12] or "<missing>"))
+    prs = run.get("pull_requests")
+    if not isinstance(prs, list):
+        return (None, "run detail returned unexpected pull_requests")
+    numbers = set()
+    for item in prs:
+        if isinstance(item, dict) and item.get("number") is not None:
+            numbers.add(str(item.get("number")))
+    if str(pr) not in numbers:
+        return (False, "not PR #%s" % pr)
+    return (True, "")
+
+
 def approve_ci(owner, repo, pr, posture=None):
     """Approve fork-PR workflow runs awaiting maintainer approval.
 
@@ -707,7 +732,15 @@ def approve_ci(owner, repo, pr, posture=None):
     pj = subprocess.run(["gh", "api", "/repos/%s/pulls/%s" % (slug, pr)], capture_output=True, text=True)
     if pj.returncode != 0:
         return ("error", "pr fetch failed: %s" % pj.stderr.strip()[:160])
-    head_ref = json.loads(pj.stdout)["head"]["ref"]
+    try:
+        pr_data = json.loads(pj.stdout)
+    except ValueError:
+        return ("error", "pr fetch returned invalid JSON")
+    head = pr_data.get("head") or {}
+    head_ref = str(head.get("ref") or "")
+    head_sha = str(head.get("sha") or "")
+    if not head_ref or not head_sha:
+        return ("error", "pr fetch returned missing head ref/sha")
 
     if posture is None:
         posture = repo_pr_target_posture(slug)
@@ -725,32 +758,52 @@ def approve_ci(owner, repo, pr, posture=None):
     warn = _approve_warning_suffix(verdict)
 
     lst = subprocess.run(
-        ["gh", "run", "list", "--branch", head_ref, "--status", "action_required",
-         "--limit", "30", "-R", slug, "--json", "databaseId,workflowName"],
+        ["gh", "run", "list", "--branch", head_ref, "--commit", head_sha,
+         "--status", "action_required", "--limit", "30", "-R", slug,
+         "--json", "databaseId,workflowName,headSha,headBranch,url"],
         capture_output=True, text=True)
     if lst.returncode != 0:
-        return ("error", "#%s (%s): workflow run list failed: %s%s"
-                % (pr, head_ref, lst.stderr.strip()[:160], warn))
+        return ("error", "#%s (%s@%s): workflow run list failed: %s%s"
+                % (pr, head_ref, head_sha[:8], lst.stderr.strip()[:160], warn))
     if not lst.stdout.strip():
-        return ("error", "#%s (%s): workflow run list returned no output%s"
-                % (pr, head_ref, warn))
+        return ("error", "#%s (%s@%s): workflow run list returned no output%s"
+                % (pr, head_ref, head_sha[:8], warn))
     try:
         runs = json.loads(lst.stdout)
     except ValueError:
-        return ("error", "#%s (%s): workflow run list returned invalid JSON%s"
-                % (pr, head_ref, warn))
+        return ("error", "#%s (%s@%s): workflow run list returned invalid JSON%s"
+                % (pr, head_ref, head_sha[:8], warn))
     if not isinstance(runs, list):
-        return ("error", "#%s (%s): workflow run list returned unexpected data%s"
-                % (pr, head_ref, warn))
+        return ("error", "#%s (%s@%s): workflow run list returned unexpected data%s"
+                % (pr, head_ref, head_sha[:8], warn))
     if not runs:
-        return ("noop", "#%s (%s): no workflow runs awaiting approval%s" % (pr, head_ref, warn))
+        return ("noop", "#%s (%s@%s): no workflow runs awaiting approval%s"
+                % (pr, head_ref, head_sha[:8], warn))
+
+    matching = []
+    skipped = []
+    for run in runs:
+        if not isinstance(run, dict) or not run.get("databaseId"):
+            return ("error", "#%s (%s@%s): workflow run list returned an entry without databaseId%s"
+                    % (pr, head_ref, head_sha[:8], warn))
+        name = run.get("workflowName", "?")
+        match, reason = _workflow_run_matches_pr(slug, run["databaseId"], pr, head_sha)
+        if match is None:
+            return ("error", "#%s (%s@%s): workflow run %s could not be verified: %s%s"
+                    % (pr, head_ref, head_sha[:8], name, reason, warn))
+        if match:
+            matching.append(run)
+        else:
+            skipped.append("%s:%s" % (name, reason))
+    if not matching:
+        msg = "#%s (%s@%s): no matching workflow runs awaiting approval" % (pr, head_ref, head_sha[:8])
+        if skipped:
+            msg += " (skipped %d unrelated run(s): %s)" % (len(skipped), ", ".join(skipped)[:240])
+        return ("noop", msg + warn)
 
     done = []
     failed = []
-    for run in runs:
-        if not isinstance(run, dict) or not run.get("databaseId"):
-            return ("error", "#%s (%s): workflow run list returned an entry without databaseId%s"
-                    % (pr, head_ref, warn))
+    for run in matching:
         rid = run["databaseId"]
         ar = subprocess.run(
             ["gh", "api", "--method", "POST", "/repos/%s/actions/runs/%s/approve" % (slug, rid)],
@@ -762,11 +815,11 @@ def approve_ci(owner, repo, pr, posture=None):
             done.append("%s:FAIL" % name)
             failed.append("%s:%s" % (name, ar.stderr.strip()[:160] or "approval failed"))
     if failed:
-        return ("error", "#%s (%s): approved %d/%d run(s), failed [%s] [%s]%s"
-                % (pr, head_ref, len(runs) - len(failed), len(runs),
+        return ("error", "#%s (%s@%s): approved %d/%d matching run(s), failed [%s] [%s]%s"
+                % (pr, head_ref, head_sha[:8], len(matching) - len(failed), len(matching),
                    ", ".join(failed), ", ".join(done), warn))
-    return ("approved", "#%s (%s): approved %d run(s) [%s]%s"
-            % (pr, head_ref, len(runs), ", ".join(done), warn))
+    return ("approved", "#%s (%s@%s): approved %d matching run(s) [%s]%s"
+            % (pr, head_ref, head_sha[:8], len(matching), ", ".join(done), warn))
 
 
 # --------------------------------------------------------------------------- #
