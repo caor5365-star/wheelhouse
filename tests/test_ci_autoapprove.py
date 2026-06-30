@@ -23,6 +23,9 @@ These tests cover:
   * the scan-log observability contract: each auto-path CI-approval candidate
     emits one notice when approved or one warning when carded, with the verdict
     reason and any approve status/message;
+  * run-to-PR verification: same-repo runs use GitHub's populated
+    `pull_requests` association, while fork runs with an empty association are
+    bound by matching `head_sha` plus `head_branch`;
   * idempotency by construction (a PR no longer `needs-ci-approval` is never
     re-approved), default-on, explicit opt-out, and the per-repo override.
 """
@@ -613,7 +616,8 @@ def run_approve_ci(run_list_result, approval_results=None, run_details=None,
         if cmd[:2] == ["gh", "api"] and "/actions/runs/" in cmd[2]:
             rid = cmd[2].rsplit("/", 1)[-1]
             detail = run_details.get(str(rid),
-                                     {"head_sha": "sha1", "pull_requests": [{"number": 1}]})
+                                     {"head_sha": "sha1", "head_branch": "feature",
+                                      "pull_requests": [{"number": 1}]})
             if detail == "error":
                 return SimpleNamespace(returncode=1, stdout="", stderr="detail failed")
             if detail == "invalid-json":
@@ -694,22 +698,43 @@ def test_approve_ci_filters_to_current_pr_head_and_number():
     check("approve_ci: run list is filtered by commit", "--commit" in cmd and "sha1" in cmd)
 
 
-def test_approve_ci_ambiguous_or_missing_pr_association_returns_error():
+def test_approve_ci_fork_run_with_empty_pr_association_is_approved():
+    runs = [{"databaseId": 101, "workflowName": "CI"}]
+    details = {"101": {"head_sha": "sha1", "head_branch": "feature", "pull_requests": []}}
+    approvals = [SimpleNamespace(returncode=0, stdout="", stderr="")]
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""), approvals, details)
+    check("approve_ci: fork run with empty PR association is approved", status == "approved")
+    check("approve_ci: fork run approval reaches matching run", calls["approved"] == ["101"])
+
+
+def test_approve_ci_fork_empty_pr_association_requires_matching_branch():
+    runs = [{"databaseId": 101, "workflowName": "CI"}]
+    details = {"101": {"head_sha": "sha1", "head_branch": "other", "pull_requests": []}}
+    status, message, calls = run_approve_ci(
+        SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""), [], details)
+    check("approve_ci: fork run with wrong branch -> noop", status == "noop")
+    check("approve_ci: fork run with wrong branch is not approved", calls["approved"] == [])
+    check("approve_ci: fork wrong-branch message mentions skipped run", "skipped" in message)
+
+
+def test_approve_ci_populated_pr_association_wrong_or_ambiguous_is_rejected():
     runs = [{"databaseId": 101, "workflowName": "CI"}]
     cases = [
-        ("ambiguous", [{"number": 1}, {"number": 2}]),
-        ("missing", []),
+        ("wrong", [{"number": 2}], "noop"),
+        ("ambiguous", [{"number": 1}, {"number": 2}], "error"),
     ]
-    for label, pull_requests in cases:
+    for label, pull_requests, want_status in cases:
         status, message, calls = run_approve_ci(
             SimpleNamespace(returncode=0, stdout=json.dumps(runs), stderr=""),
             [SimpleNamespace(returncode=0, stdout="", stderr="")],
             {"101": {"head_sha": "sha1", "pull_requests": pull_requests}})
-        check("approve_ci: %s run PR association -> error" % label, status == "error")
+        check("approve_ci: %s populated run PR association is rejected" % label,
+              status == want_status)
         check("approve_ci: %s run PR association is not approved" % label,
               calls["approved"] == [])
         check("approve_ci: %s run PR association is named" % label,
-              "pull request" in message or "could not be verified" in message)
+              "pull request" in message or "not PR" in message or "skipped" in message)
 
 
 def test_approve_ci_full_run_list_returns_error_without_approving():
@@ -930,7 +955,9 @@ def main():
     test_approve_ci_any_failed_post_returns_error()
     test_approve_ci_hold_message_caps_risky_file_list()
     test_approve_ci_filters_to_current_pr_head_and_number()
-    test_approve_ci_ambiguous_or_missing_pr_association_returns_error()
+    test_approve_ci_fork_run_with_empty_pr_association_is_approved()
+    test_approve_ci_fork_empty_pr_association_requires_matching_branch()
+    test_approve_ci_populated_pr_association_wrong_or_ambiguous_is_rejected()
     test_approve_ci_full_run_list_returns_error_without_approving()
     test_approve_ci_no_matching_runs_returns_noop_without_approving()
     test_approve_ci_run_detail_failure_returns_error()

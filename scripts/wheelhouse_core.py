@@ -781,7 +781,7 @@ def _approve_warning_suffix(verdict):
     return ""
 
 
-def _workflow_run_matches_pr(slug, run_id, pr, head_sha):
+def _workflow_run_matches_pr(slug, run_id, pr, head_sha, head_ref):
     r = _gh_api_capture("/repos/%s/actions/runs/%s" % (slug, run_id))
     if r.returncode != 0:
         return (None, "run detail fetch failed: %s" % r.stderr.strip()[:160])
@@ -800,6 +800,16 @@ def _workflow_run_matches_pr(slug, run_id, pr, head_sha):
         if not isinstance(item, dict) or item.get("number") is None:
             return (None, "run detail returned unexpected pull_requests")
         numbers.append(str(item.get("number")))
+    if not numbers:
+        run_branch = str(run.get("head_branch") or "")
+        if run_branch != str(head_ref):
+            return (False, "branch %s" % (run_branch or "<missing>"))
+        # GitHub leaves workflow_run.pull_requests empty for fork-originated
+        # action_required runs. The list query is already filtered by branch,
+        # commit, and status; matching a 40-char head SHA plus head branch is
+        # the strong run-to-PR binding available for the fork case this gate
+        # exists to serve.
+        return (True, "")
     if len(numbers) != 1:
         return (None, "run detail has %d pull request associations" % len(numbers))
     if numbers[0] != str(pr):
@@ -897,7 +907,7 @@ def approve_ci(owner, repo, pr, posture=None, strict=False):
             return ("error", "#%s (%s@%s): workflow run list returned an entry without databaseId%s"
                     % (pr, head_ref, head_sha[:8], warn))
         name = run.get("workflowName", "?")
-        match, reason = _workflow_run_matches_pr(slug, run["databaseId"], pr, head_sha)
+        match, reason = _workflow_run_matches_pr(slug, run["databaseId"], pr, head_sha, head_ref)
         if match is None:
             return ("error", "#%s (%s@%s): workflow run %s could not be verified: %s%s"
                     % (pr, head_ref, head_sha[:8], name, reason, warn))
