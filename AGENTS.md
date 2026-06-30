@@ -178,9 +178,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   inputs for bot-dispatched runs instead of re-reading the mutable card body.
   To make direct verification possible, owner-triggered `workflow_dispatch` may be run with only `issue=...`; that path fetches and parses the current card body with `github.token`.
   The Claude action has `allowed_bots: github-actions[bot]` for the decision-handler dispatch only, because otherwise `anthropics/claude-code-action` rejects the `github.token`-dispatched bot run before it emits `execution_file`.
-  The manual `needs-deep-review` label path is unchanged (a human applying it
-  raises the `labeled` event normally) and remains the only path that parses the
-  card body in `deep-review.yml`.
+  The manual `needs-deep-review` label path is unchanged (a human applying it raises the `labeled` event normally) and remains a card-body parse path in `deep-review.yml`, alongside owner-triggered issue-only `workflow_dispatch` verification runs.
   This is a deliberate asymmetry: the manual `needs-deep-review` label path authorizes only the repository owner.
   A configured co-maintainer uses the Investigate checkbox, which runs through the maintainer-gated decision-handler (`wheelhouse_core.maintainers()` = owner + configured maintainer).
   `investigate` is in the
