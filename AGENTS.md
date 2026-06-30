@@ -225,6 +225,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   `ci-approval` card exactly as before, carrying the safety warning. **Fail closed
   everywhere**: an unsafe verdict, a `hold`/`error` from the approve, or an
   approve that throws all fall back to a card - nothing is silently dropped.
+  `ci-approval` is fork-only: same-repo PRs with no CI signal route to
+  `review-needed`, while unknown fork status fails safe by raising a manual
+  `ci-approval` card with no auto-approve attempt.
+  An `approve_ci` `noop` is a verified "nothing awaiting approval" state, so the
+  scan emits no worklist item and reconcile consumes any stale card; if a real
+  pending run appears on a later scan, the normal create/approve/card path runs
+  again.
   Fork-originated `action_required` workflow runs are expected to have an empty `workflow_run.pull_requests` list, so `approve_ci` verifies that fork case with the already-filtered run's exact `head_sha` plus `head_branch`; non-empty `pull_requests` stays strict and must contain exactly the target PR.
   **Observability (every outcome is logged, never silent).** `_auto_approve_or_card`
   returns `(handled, card_note, log_note)` and `build_repo` emits exactly ONE
