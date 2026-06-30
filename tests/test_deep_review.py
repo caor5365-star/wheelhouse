@@ -19,7 +19,7 @@ so these tests pin the *wiring* instead:
     FLEET_TOKEN and `persist-credentials: false`, runs Claude restricted to
     read-only exploration tools (Read/Grep/Glob), and the Claude step never
     receives FLEET_TOKEN; it narrowly allows only the GitHub Actions bot because
-    owner-gated Investigate dispatches this workflow via github.token; the
+    maintainer-gated Investigate dispatches this workflow via github.token; the
     trusted post step captures the action's final output from `execution_file`
     and posts it with the default token;
   * prompt boundary: the mutable decision card, target diff/issue text, and
@@ -27,7 +27,8 @@ so these tests pin the *wiring* instead:
   * investigate trigger: decision-handler.yml keeps `actions: write` only on an
     Investigate dispatch job that clears the box and dispatches deep-review.yml
     via workflow_dispatch on the default token, carrying the parsed target
-    binding.
+    binding; owner-run issue-only workflow_dispatch fetches and parses the
+    current card body for direct verification.
 """
 
 import os
