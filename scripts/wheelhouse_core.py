@@ -6,8 +6,9 @@ Runs inside GitHub Actions. One GraphQL query per repo fetches every open
 PR/issue with compliance + test status, classifies each deterministically, and
 emits a worklist of items that need the maintainer's decision. Also carries the
 security-gated CI approval (the fork-CI / pwn-request HOLD) and the scan-time
-auto-approval of provably-safe fork-CI runs (so only risky or uncertain ones
-raise a card, and verified no-pending runs emit no stale card). The auto path
+auto-approval of provably-safe fork-CI runs (so only contributor-authored risky
+or uncertain ones raise a card, excluded-author failures log suppressed-card,
+and verified no-pending runs emit no stale card). The auto path
 logs exactly one stderr workflow-command line per CI-approval candidate it
 handles, so approvals, no-pending results, approve failures, and fail-closed
 verdicts are visible in the scan-backstop run log.
@@ -462,7 +463,7 @@ def _ci_safety_note(verdict):
         parts.append(
             "This PR targets base branch `%s`, but the repo default is `%s`. "
             "Wheelhouse only auto-checks `pull_request_target` posture on the "
-            "default branch, so it fails closed and raises a card for manual review."
+            "default branch, so it fails closed for manual review."
             % (base, default)
         )
     elif verdict.get("exploit"):
@@ -496,8 +497,8 @@ def _auto_approve_or_card(
       * handled=True  -> the run was auto-approved OR there is no pending run to
         approve; emit NO card. `card_note` is unused (None) and `log_note` is
         the audit line for the scan-step `::notice::`.
-      * handled=False -> raise a card; `card_note` is the safety warning to
-        surface on the card body (may be "", left EXACTLY as before), and
+      * handled=False -> return a card fallback; `card_note` is the safety warning
+        to surface on the card body (may be "", left EXACTLY as before), and
         `log_note` is the per-PR outcome line for the scan-step `::warning::`.
     `log_note` ALWAYS carries the `ci_safety` verdict `reason`, plus - when an
     approve was attempted - the `approve_ci` `status` + `message`. That is what
@@ -505,7 +506,7 @@ def _auto_approve_or_card(
     the scan log; it is a logging string only (gh stderr/status text, never a
     token) and does NOT change the card body.
     Fails CLOSED: any uncertainty (unsafe verdict, hold, approve error/exception)
-    routes to a card so nothing is ever silently lost."""
+    returns the caller-visible fallback outcome."""
     verdict = ci_safety("%s/%s" % (owner, name), str(pr_number), posture, changed_files)
     reason = verdict.get("reason", "")
     if auto_enabled and verdict["safe"]:
@@ -523,14 +524,14 @@ def _auto_approve_or_card(
                 None,
                 "verdict safe (%s); approve_ci noop: %s" % (reason, message),
             )
-        # hold / error -> fall through to a card (fail-closed), keeping the why.
+        # hold / error -> fall through to caller fallback (fail-closed), keeping the why.
         card_note = "auto-approve did not complete (%s: %s)" % (status, message)
         safety_note = _ci_safety_note(verdict)
         if safety_note:
             card_note += "; " + safety_note
         log_note = "verdict safe (%s); approve_ci %s: %s" % (reason, status, message)
         return (False, card_note, log_note)
-    # Auto-approve disabled, or an unsafe verdict -> card; no approve attempted.
+    # Auto-approve disabled, or an unsafe verdict -> caller fallback; no approve attempted.
     log_note = "verdict %s (%s); not auto-approved%s" % (
         "safe" if verdict["safe"] else "unsafe",
         reason,
@@ -545,11 +546,14 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True):
     `auto_approve_ci` is the fleet-wide default (config `auto_approve_ci`, itself
     defaulting True); a repo may override it per-repo. Same-repo PRs with no CI
     signal route to normal review, not CI approval. Unknown fork status keeps a
-    manual CI-approval card with no auto-approve attempt. When enabled, a fork PR
+    manual CI-approval card with no auto-approve attempt for contributor-authored
+    PRs and logs a suppressed card for owner/maintainer/bot-authored PRs. When
+    enabled, or when the author is excluded from the decision queue, a fork PR
     whose `ci_safety` verdict is provably safe is approved here (in the
     FLEET_TOKEN scan context), or verified as having no pending run, and emits NO
-    card; everything risky/uncertain still becomes a card. Each handled
-    ci-approval PR also emits exactly one stderr notice/warning outcome line.
+    card; risky/uncertain contributor PRs still become cards while excluded-author
+    PRs only log suppressed-card warnings. Each handled ci-approval PR also emits
+    exactly one stderr notice/warning outcome line.
     This runs only on the ok:true success path below, so an ok:false repo (early
     return) is never auto-approved."""
     name = repo_cfg["name"]
