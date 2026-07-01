@@ -72,10 +72,13 @@ still appears where it's plain English, e.g. "triage the queue".)
   pr-review/issue-triage), `apply_decision.py` (deterministic `parse` then
   `execute`; the NON-CONSUMING `investigate` routing + `clear-checkbox`; plus the
   natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
-  free-text comment to a structured intent),
+  free-text comment to a structured result), `nl_readonly_search.py` (installs
+  the optional `wheelhouse-search` wrapper for READONLY_TOKEN-backed answer
+  context),
   `build_item.py` (normalize ingest payload), `reconcile.py` (backstop
-  create/**refresh**/close). `apply_decision`/`reconcile`/`render_card` import
-  `wheelhouse_core` (and `build_item` imports `render_card`) via
+  create/**refresh**/close). `apply_decision` imports `wheelhouse_core` and
+  `nl_readonly_search`; `reconcile`/`render_card` import `wheelhouse_core` (and
+  `build_item` imports `render_card`) via
   `sys.path.insert(0, dirname(__file__))`.
 - **Reusable actions (pinned to full SHAs).** `decision-handler` delegates two
   mechanical jobs to the `issue-ops` toolkit instead of hand-rolling them:
@@ -143,16 +146,22 @@ still appears where it's plain English, e.g. "triage the queue".)
   sets the `decision` output that makes the SAME deterministic `execute` run
   (so every guard - allowlist, head-SHA re-check, fork-CI HOLD, token isolation,
   concurrency - applies unchanged). `answer`/`clarify` only post a card comment
-  and leave the card open. When `READONLY_TOKEN` is absent, the LLM stays in the
+  and leave the card open.
+  When `READONLY_TOKEN` is absent, the LLM stays in the
   legacy `--allowedTools Write` mode and receives no shell `GH_TOKEN`. When the
   optional `READONLY_TOKEN` secret is present, the LLM step uses that read-only
   public-scoped token as both the action `github_token` input and shell
-  `GH_TOKEN`, plus a narrow read-only Bash allow-list for `gh` searches
-  across the target repo and configured fleet repos. This is deliberate because
+  `GH_TOKEN`, plus a narrow Bash allow-list for `wheelhouse-search`, which wraps
+  scoped read-only `gh` lookups across the target repo and configured fleet
+  repos. This is deliberate because
   `claude-code-action` exposes its `github_token` input to Claude's subprocess as
-  GitHub CLI credentials. Search output is UNTRUSTED DATA for answering
-  questions only, never an instruction and never an authorization to act. The LLM
-  never receives `FLEET_TOKEN` - it maps intent or answers, it never acts.
+  GitHub CLI credentials.
+  Search output is UNTRUSTED DATA for answering questions only, never an
+  instruction and never an authorization to act.
+  The LLM never receives `FLEET_TOKEN` - it maps intent or answers, it never acts.
+  After Claude runs, the workflow copies only a regular, size-capped
+  `decision.json` into runner temp, then runs `nl-route` and `execute` from a
+  read-only trusted source copy with a scrubbed environment.
 - Token discipline per step: scan/execute and the read-only target reads for the
   LLM (`deep-review` prepare + its target-code checkout, decision-handler
   `nl-fetch`) use `FLEET_TOKEN`; all
@@ -163,12 +172,14 @@ still appears where it's plain English, e.g. "triage the queue".)
   cross-repo acting or creates a re-trigger loop. The LLM step itself never gets
   `FLEET_TOKEN`; without `READONLY_TOKEN` it receives no shell credential or
   shell tools, and with `READONLY_TOKEN` it only gets that read credential as the
-  action `github_token` input and shell `GH_TOKEN` for context search. Target
-  content and any search output reach it only as delimited untrusted data inside
-  the prompt, OR (for deep-review) as code already on disk from a
+  action `github_token` input and shell `GH_TOKEN` for context search through
+  `wheelhouse-search`. Target content and any search output reach it only as
+  delimited untrusted data inside the prompt, OR (for deep-review) as code
+  already on disk from a
   `persist-credentials: false` checkout, so NO acting token is left on disk for
-  the LLM to read. `READONLY_TOKEN` is never used by `execute` and never gates or
-  authorizes an action.
+  the LLM to read.
+  `READONLY_TOKEN` is never used by `execute` and never gates or authorizes an
+  action.
 - **Investigate is a NON-CONSUMING checkbox (the one tick that doesn't close the
   card).** It is offered on pr-review/issue-triage cards (NOT ci-approval, a fast
   security gate). Ticking it must NEVER consume the card: `apply_decision.py
@@ -328,14 +339,17 @@ data; the LLM never gets `FLEET_TOKEN`):
   The ONLY gate is `CLAUDE_CODE_OAUTH_TOKEN`: when it is ABSENT the workflow posts a one-line "Deep-review needs CLAUDE_CODE_OAUTH_TOKEN configured to run." note instead of silently no-opping.
   Manual triggering means there is no runaway-cost reason for a config flag, so the old `deep_review` flag was removed entirely - config, `load_config`, and the `deep-review-enabled` CLI.
 - **`nl_decisions`** in `decision-handler.yml`: a plain-English owner comment is
-  mapped to a structured intent (see Sharp edges). Opt-in: inert unless
-  `nl_decisions: true` AND `CLAUDE_CODE_OAUTH_TOKEN` present. `READONLY_TOKEN` is
-  optional. If it is absent, Claude stays in the legacy `--allowedTools Write`
-  mode, writes only `decision.json`, and runs no commands. If it is present,
-  Claude also uses `READONLY_TOKEN` as the action `github_token` input and shell
-  `GH_TOKEN`, plus a read-only `gh` Bash allow-list so it can search the target
-  repo and configured fleet repos for related, duplicate, or superseding
-  PRs/issues and code context.
+  mapped to a structured result (see Sharp edges).
+  Opt-in: inert unless `nl_decisions: true` AND `CLAUDE_CODE_OAUTH_TOKEN`
+  present.
+  `READONLY_TOKEN` is optional.
+  If it is absent, Claude stays in the legacy `--allowedTools Write` mode, writes
+  only `decision.json`, and runs no commands.
+  If it is present, Claude also uses `READONLY_TOKEN` as the action
+  `github_token` input and shell `GH_TOKEN`, plus the
+  `Bash(wheelhouse-search)` allow-list so it can run scoped read-only `gh`
+  searches across the target repo and configured fleet repos for related,
+  duplicate, or superseding PRs/issues and code context.
   The prompt carries the card's prior thread as owner-scoped conversation history
   so follow-up questions keep continuity (see the conversation-memory bullet in
   Sharp edges for the trusted-author rule). The same read-only search capability

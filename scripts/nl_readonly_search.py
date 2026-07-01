@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""Scoped read-only search helper for the nl_decisions Claude step.
+
+The workflow installs this file as `wheelhouse-search` only when the optional
+READONLY_TOKEN secret is present. Claude can write a JSON request to
+`search-request.json` and run that wrapper, but the wrapper controls the actual
+`gh` command shape: no writes, no arbitrary repository scope, and bounded output.
+Allowed repositories are the target repo plus owner-scoped repos from
+`wheelhouse.config.yml`.
+"""
+
 import json
 import os
 import re
