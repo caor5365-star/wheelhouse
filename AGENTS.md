@@ -154,6 +154,8 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Automatic PR triage is a cached card-side side job, not routing.**
   It applies only to pure `needs-decision` pr-review cards when the effective
   `auto_triage` setting is true and `CLAUDE_CODE_OAUTH_TOKEN` is present.
+  For explicit ingest payloads, `auto_triage:false` is an item-level opt-out only;
+  it cannot force triage on when the global or per-repo config disables it.
   The cache key is the card state's `triaged_sha`, compared to the current
   `head_sha`.
   Missing `triaged_sha` on an existing open card counts as stale, so legacy
@@ -365,9 +367,9 @@ still appears where it's plain English, e.g. "triage the queue".)
 
 Three independent LLM features share the same auth (a Claude **subscription** token
 from `claude setup-token` via `anthropics/claude-code-action` - NOT an Anthropic
-API key) and the same injection model (only owner-authored text is an
-instruction; target content and optional search output are delimited untrusted
-data; the LLM never gets `FLEET_TOKEN`):
+API key) and the same injection model (only trusted workflow prompts and
+owner/maintainer-authored text are instructions; target content and optional
+search output are delimited untrusted data; the LLM never gets `FLEET_TOKEN`):
 Every `anthropics/claude-code-action` LLM step is pinned to `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes `--model sonnet`.
 The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on the Anthropic API, Claude Code versions v2.1.197 and later resolve `sonnet` to Sonnet 5.
 

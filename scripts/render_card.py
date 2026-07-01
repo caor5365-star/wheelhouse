@@ -11,6 +11,9 @@ card-side activity never re-triggers the handler).
 CLI:
   render_card.py upsert --item-file item.json    create-or-refresh a card (dedup by marker)
   render_card.py render --item-file item.json --out-dir DIR    debug: write title/body/labels
+  render_card.py queue-triage --item-file item.json    mark triage queued and dispatch triage.yml when eligible
+  render_card.py triage-apply --issue N --head-sha SHA --execution-file FILE    update the card from Claude output
+  render_card.py triage-fail --issue N --head-sha SHA --message TEXT    write the auto-triage unavailable section
 """
 import argparse
 import json
