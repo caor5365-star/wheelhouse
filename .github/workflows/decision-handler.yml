@@ -250,7 +250,7 @@ jobs:
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
           claude_args: |
             --allowedTools "Write,Bash(wheelhouse-search)"
-            --max-turns 6
+            --max-turns 32
             --model sonnet
 
       # Legacy no-search branch. This is the exact old tool posture: Write only,
@@ -265,7 +265,7 @@ jobs:
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
           claude_args: |
             --allowedTools Write
-            --max-turns 6
+            --max-turns 32
             --model sonnet
 
       - id: nl-result

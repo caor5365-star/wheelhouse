@@ -365,7 +365,7 @@ def test_code_grounded_checkout_and_tool_isolation():
         args = str((legacy.get("with") or {}).get("claude_args", "")).strip()
         check(
             "security: legacy Claude keeps no-search tools and Sonnet alias",
-            args == "--allowedTools Read,Grep,Glob\n--max-turns 30\n--model sonnet",
+            args == "--allowedTools Read,Grep,Glob\n--max-turns 64\n--model sonnet",
         )
         check(
             "security: legacy Claude has no GH_TOKEN env",

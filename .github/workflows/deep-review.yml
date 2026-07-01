@@ -395,7 +395,7 @@ jobs:
           prompt: ${{ steps.prepare.outputs.prompt }}
           claude_args: |
             --allowedTools "Read,Grep,Glob,Write,Bash(wheelhouse-search)"
-            --max-turns 30
+            --max-turns 64
             --model sonnet
 
       # Legacy no-search branch. This is the exact old tool posture:
@@ -418,7 +418,7 @@ jobs:
           prompt: ${{ steps.prepare.outputs.prompt }}
           claude_args: |
             --allowedTools Read,Grep,Glob
-            --max-turns 30
+            --max-turns 64
             --model sonnet
 
       # Post the verdict on the card with THIS repo's token (never FLEET_TOKEN).
