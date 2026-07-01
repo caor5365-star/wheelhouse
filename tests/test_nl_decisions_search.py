@@ -46,6 +46,17 @@ def claude_steps(steps):
     return [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
 
 
+def test_handle_checkout_does_not_persist_default_token():
+    checkouts = [s for s in handle_steps() if "actions/checkout" in str(s.get("uses", ""))]
+
+    check("workflow: handle job checkout exists", len(checkouts) >= 1)
+    for checkout in checkouts:
+        check(
+            "workflow: handle checkout does not persist github.token",
+            (checkout.get("with") or {}).get("persist-credentials") is False,
+        )
+
+
 def test_readonly_gate_and_prompt_gating():
     steps = handle_steps()
     gate = step_by_id(steps, "nl-readonly")
@@ -142,10 +153,6 @@ def test_claude_steps_split_legacy_vs_search():
             "Bash(gh issue list *)",
             "Bash(gh issue view *)",
             "Bash(gh search *)",
-            "Bash(gh api repos/*)",
-            "Bash(gh api /repos/*)",
-            "Bash(gh api search/*)",
-            "Bash(gh api /search/*)",
             "Bash(git clone https://github.com/*)",
             "Bash(git log *)",
             "Bash(git show *)",
@@ -160,6 +167,7 @@ def test_claude_steps_split_legacy_vs_search():
             "gh pr merge",
             "gh issue close",
             "gh workflow run",
+            "gh api",
             "git push",
             "git commit",
         ):
@@ -202,6 +210,7 @@ def test_route_and_execute_stay_deterministic():
 
 
 def main():
+    test_handle_checkout_does_not_persist_default_token()
     test_readonly_gate_and_prompt_gating()
     test_claude_steps_split_legacy_vs_search()
     test_route_and_execute_stay_deterministic()

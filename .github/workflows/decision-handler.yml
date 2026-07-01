@@ -39,6 +39,8 @@ jobs:
       head_sha: ${{ steps.decide.outputs.head_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -222,7 +224,7 @@ jobs:
           github_token: ${{ secrets.READONLY_TOKEN }}
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
           claude_args: |
-            --allowedTools "Write,Bash(gh pr list *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh issue list *),Bash(gh issue view *),Bash(gh search *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api search/*),Bash(gh api /search/*),Bash(git clone https://github.com/*),Bash(git log *),Bash(git show *),Bash(git grep *),Bash(git -C * log *),Bash(git -C * show *),Bash(git -C * grep *)"
+            --allowedTools "Write,Bash(gh pr list *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh issue list *),Bash(gh issue view *),Bash(gh search *),Bash(git clone https://github.com/*),Bash(git log *),Bash(git show *),Bash(git grep *),Bash(git -C * log *),Bash(git -C * show *),Bash(git -C * grep *)"
             --max-turns 6
 
       # Legacy no-search branch. This is the exact old tool posture: Write only,
