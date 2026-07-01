@@ -463,6 +463,7 @@ def test_triage_workflow_security_wiring():
     steps = doc["jobs"]["triage"]["steps"]
     text = read(".github", "workflows", "triage.yml")
     trusted = step_by_id(steps, "trusted-src")
+    prepare = step_by_id(steps, "prepare")
     preserve = step_by_id(steps, "triage-result")
     update = step_by_name(steps, "Update the decision card")
 
@@ -545,6 +546,19 @@ def test_triage_workflow_security_wiring():
         "workflow: prompt says advisory only and never act",
         "This is advisory" in text and "Never act" in text,
     )
+    check("workflow: prompt preparation exists", prepare is not None)
+    if prepare:
+        run = str(prepare.get("run", ""))
+        check(
+            "security: prompt output delimiter is generated",
+            "secrets.token_hex" in run
+            and "__WHEELHOUSE_TRIAGE_PROMPT_EOF__" not in run,
+        )
+        check(
+            "security: prompt output delimiter is checked against prompt",
+            'grep -Fxq "$delimiter" prompt.txt' in run
+            and 'echo "prompt<<$delimiter"' in run,
+        )
 
     check("workflow: triage result handoff exists", preserve is not None)
     if preserve:
@@ -595,6 +609,22 @@ def test_triage_workflow_security_wiring():
         check(
             "workflow: final card update reads isolated result file",
             env.get("TRIAGE_EXECUTION_FILE") == "${{ steps.triage-result.outputs.path }}",
+        )
+        check(
+            "workflow: final card update carries gh repo context",
+            env.get("GH_REPO") == "${{ github.repository }}"
+            and 'GH_REPO="$GH_REPO"' in run,
+        )
+        check(
+            "workflow: final card update uses temp gh home",
+            env.get("TRUSTED_HOME") == "${{ runner.temp }}/wheelhouse-gh-home"
+            and 'mkdir -p "$TRUSTED_HOME"' in run
+            and 'HOME="$TRUSTED_HOME"' in run,
+        )
+        check(
+            "workflow: final card update disables gh prompts",
+            env.get("GH_PROMPT_DISABLED") == "1"
+            and 'GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED"' in run,
         )
         check(
             "workflow: final card update scrubs inherited model environment",

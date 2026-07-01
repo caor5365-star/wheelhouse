@@ -279,10 +279,14 @@ jobs:
             echo "Do not mention contributors with @mentions."
           } > prompt.txt
 
+          delimiter="$(python -c 'import secrets; print("WHEELHOUSE_TRIAGE_PROMPT_" + secrets.token_hex(32))')"
+          while grep -Fxq "$delimiter" prompt.txt; do
+            delimiter="$(python -c 'import secrets; print("WHEELHOUSE_TRIAGE_PROMPT_" + secrets.token_hex(32))')"
+          done
           {
-            echo "prompt<<__WHEELHOUSE_TRIAGE_PROMPT_EOF__"
+            echo "prompt<<$delimiter"
             cat prompt.txt
-            echo "__WHEELHOUSE_TRIAGE_PROMPT_EOF__"
+            echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
 
       - id: search-tool
@@ -369,6 +373,9 @@ jobs:
           TRIAGE_EXECUTION_FILE: ${{ steps.triage-result.outputs.path }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
+          GH_REPO: ${{ github.repository }}
+          GH_PROMPT_DISABLED: "1"
           PATH: ${{ steps.trusted-src.outputs.safe_path }}
           BASH_ENV: ""
           ENV: ""
@@ -378,12 +385,16 @@ jobs:
           PYTHONPATH: ""
         run: |
           set -euo pipefail
+          mkdir -p "$TRUSTED_HOME"
           if [ "${HEAD_OK:-}" = "false" ]; then
             env -i \
               PATH="$TRUSTED_PATH" \
               PYTHONDONTWRITEBYTECODE=1 \
               PYTHONNOUSERSITE=1 \
+              HOME="$TRUSTED_HOME" \
               GH_TOKEN="$GH_TOKEN" \
+              GH_REPO="$GH_REPO" \
+              GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
               "$TRUSTED_PYTHON" scripts/render_card.py triage-fail \
                 --issue "$ISSUE" \
                 --head-sha "$HEAD_SHA" \
@@ -393,7 +404,10 @@ jobs:
               PATH="$TRUSTED_PATH" \
               PYTHONDONTWRITEBYTECODE=1 \
               PYTHONNOUSERSITE=1 \
+              HOME="$TRUSTED_HOME" \
               GH_TOKEN="$GH_TOKEN" \
+              GH_REPO="$GH_REPO" \
+              GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
               "$TRUSTED_PYTHON" scripts/render_card.py triage-apply \
                 --issue "$ISSUE" \
                 --head-sha "$HEAD_SHA" \
