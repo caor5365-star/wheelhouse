@@ -42,6 +42,10 @@ def step_by_name(steps, name):
     return next((s for s in steps if s.get("name") == name), None)
 
 
+def step_index(steps, predicate):
+    return next((i for i, step in enumerate(steps) if predicate(step)), None)
+
+
 def claude_steps(steps):
     return [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
 
@@ -152,14 +156,10 @@ def test_claude_steps_split_legacy_vs_search():
             "Bash(gh pr diff *)",
             "Bash(gh issue list *)",
             "Bash(gh issue view *)",
-            "Bash(gh search *)",
-            "Bash(git clone https://github.com/*)",
-            "Bash(git log *)",
-            "Bash(git show *)",
-            "Bash(git grep *)",
-            "Bash(git -C * log *)",
-            "Bash(git -C * show *)",
-            "Bash(git -C * grep *)",
+            "Bash(gh search issues *)",
+            "Bash(gh search prs *)",
+            "Bash(gh search code *)",
+            "Bash(gh search repos *)",
         ):
             check("workflow: search step allows %s" % pattern, pattern in args)
         for forbidden in (
@@ -170,8 +170,77 @@ def test_claude_steps_split_legacy_vs_search():
             "gh api",
             "git push",
             "git commit",
+            "git grep",
+            "git -C",
+            "Bash(git",
+            "Bash(gh search *)",
+            "--open-files-in-pager",
         ):
             check("workflow: search step does not allow %s" % forbidden, forbidden not in args)
+
+
+def test_claude_output_is_isolated_before_routing():
+    steps = handle_steps()
+    preserve = step_by_id(steps, "nl-result")
+    restore = step_by_name(steps, "Restore deterministic checkout after Claude")
+    route = step_by_id(steps, "route")
+
+    check("workflow: nl-result step exists", preserve is not None)
+    if preserve:
+        run = str(preserve.get("run", ""))
+        check(
+            "workflow: nl-result stores only decision.json in runner temp",
+            "${RUNNER_TEMP}/wheelhouse-nl" in run
+            and "cp decision.json \"$out_file\"" in run,
+        )
+        check(
+            "workflow: nl-result rejects symlink or non-file results",
+            "[ -L decision.json ]" in run and "[ ! -f decision.json ]" in run,
+        )
+        check(
+            "workflow: nl-result caps the LLM result size",
+            "65536" in run and "wc -c < decision.json" in run,
+        )
+
+    check("workflow: post-Claude checkout restore exists", restore is not None)
+    if restore:
+        restore_with = restore.get("with") or {}
+        check(
+            "workflow: post-Claude checkout cleans tracked and untracked tampering",
+            restore_with.get("clean") is True,
+        )
+        check(
+            "workflow: post-Claude checkout does not persist github.token",
+            restore_with.get("persist-credentials") is False,
+        )
+
+    check("workflow: nl-route step still exists", route is not None)
+    if route:
+        env = route.get("env", {})
+        check(
+            "workflow: nl-route reads the isolated decision file",
+            env.get("DECISION_FILE")
+            == "${{ runner.temp }}/wheelhouse-nl/decision.json",
+        )
+
+    preserve_i = step_index(steps, lambda s: s.get("id") == "nl-result")
+    restore_i = step_index(
+        steps, lambda s: s.get("name") == "Restore deterministic checkout after Claude"
+    )
+    route_i = step_index(steps, lambda s: s.get("id") == "route")
+    claude_indexes = [
+        i for i, s in enumerate(steps) if "claude-code-action" in str(s.get("uses", ""))
+    ]
+    check(
+        "workflow: nl-result runs after every Claude step",
+        preserve_i is not None
+        and claude_indexes
+        and all(i < preserve_i for i in claude_indexes),
+    )
+    check(
+        "workflow: checkout restore runs before nl-route",
+        None not in (preserve_i, restore_i, route_i) and preserve_i < restore_i < route_i,
+    )
 
 
 def test_route_and_execute_stay_deterministic():
@@ -213,6 +282,7 @@ def main():
     test_handle_checkout_does_not_persist_default_token()
     test_readonly_gate_and_prompt_gating()
     test_claude_steps_split_legacy_vs_search()
+    test_claude_output_is_isolated_before_routing()
     test_route_and_execute_stay_deterministic()
     print()
     if _failures:

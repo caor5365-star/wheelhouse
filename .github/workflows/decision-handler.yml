@@ -205,7 +205,7 @@ jobs:
         run: python scripts/apply_decision.py nl-prompt
 
       # Claude maps intent -> writes decision.json. If READONLY_TOKEN exists,
-      # this branch may also run read-only gh/git shell commands for answer
+      # this branch may also run read-only gh shell commands for answer
       # context. The action's github_token input is READONLY_TOKEN here because
       # claude-code-action also exposes that input to the Claude subprocess as
       # GitHub CLI credentials. GH_TOKEN is READONLY_TOKEN, never FLEET_TOKEN,
@@ -224,7 +224,7 @@ jobs:
           github_token: ${{ secrets.READONLY_TOKEN }}
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
           claude_args: |
-            --allowedTools "Write,Bash(gh pr list *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh issue list *),Bash(gh issue view *),Bash(gh search *),Bash(git clone https://github.com/*),Bash(git log *),Bash(git show *),Bash(git grep *),Bash(git -C * log *),Bash(git -C * show *),Bash(git -C * grep *)"
+            --allowedTools "Write,Bash(gh pr list *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh issue list *),Bash(gh issue view *),Bash(gh search issues *),Bash(gh search prs *),Bash(gh search code *),Bash(gh search repos *)"
             --max-turns 6
 
       # Legacy no-search branch. This is the exact old tool posture: Write only,
@@ -241,13 +241,42 @@ jobs:
             --allowedTools Write
             --max-turns 6
 
+      - id: nl-result
+        if: steps.nl-gate.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/wheelhouse-nl"
+          out_file="${out_dir}/decision.json"
+          mkdir -p "$out_dir"
+          : > "$out_file"
+          if [ -e decision.json ]; then
+            if [ -L decision.json ] || [ ! -f decision.json ]; then
+              echo "::error::Invalid decision.json produced by Claude"
+              exit 1
+            fi
+            size=$(wc -c < decision.json)
+            size=${size//[[:space:]]/}
+            if [ "$size" -gt 65536 ]; then
+              echo "::error::decision.json is too large"
+              exit 1
+            fi
+            cp decision.json "$out_file"
+          fi
+
+      - name: Restore deterministic checkout after Claude
+        if: steps.nl-gate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+
       # Validate the LLM's structured result against the per-kind allowlist and
       # emit deterministic outputs. `decision` is non-empty ONLY for a valid
       # `action` mode - that is what makes the execute step below run.
       - id: route
         if: steps.nl-gate.outputs.proceed == 'true'
         env:
-          DECISION_FILE: decision.json
+          DECISION_FILE: ${{ runner.temp }}/wheelhouse-nl/decision.json
           ISSUE_BODY: ${{ github.event.issue.body }}
           KIND: ${{ steps.nl-gate.outputs.kind }}
         run: python scripts/apply_decision.py nl-route

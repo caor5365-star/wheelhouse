@@ -26,7 +26,7 @@ Covers:
     invariant), and the triggering comment is excluded (it is the new
     instruction, passed separately);
   * the optional READONLY_TOKEN search prompt: when enabled it tells the LLM how
-    to use read-only gh/git for answer context, and when disabled the prompt
+    to use read-only gh for answer context, and when disabled the prompt
     stays in the legacy no-shell/no-search mode.
 """
 import contextlib
@@ -471,7 +471,7 @@ def test_prompt_search_capability_is_gated():
           "must never attempt a write or act operation" in enabled)
     check("prompt: search mode keeps deterministic acting boundary",
           "deterministic acting path is unchanged" in enabled)
-    check("prompt: search mode no longer says to avoid all gh/git commands",
+    check("prompt: search mode no longer says to avoid gh commands",
           "do not run any git or gh commands" not in enabled)
 
 

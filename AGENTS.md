@@ -147,7 +147,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   legacy `--allowedTools Write` mode and receives no shell `GH_TOKEN`. When the
   optional `READONLY_TOKEN` secret is present, the LLM step uses that read-only
   public-scoped token as both the action `github_token` input and shell
-  `GH_TOKEN`, plus a narrow read-only Bash allow-list for `gh`/`git` searches
+  `GH_TOKEN`, plus a narrow read-only Bash allow-list for `gh` searches
   across the target repo and configured fleet repos. This is deliberate because
   `claude-code-action` exposes its `github_token` input to Claude's subprocess as
   GitHub CLI credentials. Search output is UNTRUSTED DATA for answering
@@ -333,8 +333,8 @@ data; the LLM never gets `FLEET_TOKEN`):
   optional. If it is absent, Claude stays in the legacy `--allowedTools Write`
   mode, writes only `decision.json`, and runs no commands. If it is present,
   Claude also uses `READONLY_TOKEN` as the action `github_token` input and shell
-  `GH_TOKEN`, plus a read-only `gh`/`git` Bash allow-list so it can search the
-  target repo and configured fleet repos for related, duplicate, or superseding
+  `GH_TOKEN`, plus a read-only `gh` Bash allow-list so it can search the target
+  repo and configured fleet repos for related, duplicate, or superseding
   PRs/issues and code context.
   The prompt carries the card's prior thread as owner-scoped conversation history
   so follow-up questions keep continuity (see the conversation-memory bullet in
