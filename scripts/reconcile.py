@@ -115,9 +115,10 @@ def main():
     worklist_keys = {(item["repo"], int(item["number"])) for item in items}
 
     # 1) For each scanned worklist item, create a card if none exists, else
-    #    refresh it in place when its target materially changed. Items only come
-    #    from ok:true repos (build_repo returns no items for a failed scan), so
-    #    this path never refreshes a card for a repo whose state is unknown.
+    #    refresh it in place when its target materially changed or its card
+    #    render_version is stale. Items only come from ok:true repos (build_repo
+    #    returns no items for a failed scan), so this path never refreshes a card
+    #    for a repo whose state is unknown.
     created = 0
     refreshed = 0
     triage_queued = 0

@@ -60,8 +60,9 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Workflows:** `ingest` (dispatch/manual -> upsert a card), `decision-handler`
   (tick/slash/**plain-English** -> act on target -> consume card), `scan-backstop`
   (hourly scan -> reconcile: create/refresh/close - the primary keep-current path
-  now that cards refresh on material change; safe to run hourly because reconcile
-  is a full no-op when nothing changed, and queues automatic PR triage when the
+  now that cards refresh on material change or render-version staleness; safe to
+  run hourly because reconcile is a full no-op when neither trigger fires, and
+  queues automatic PR triage when the
   current head lacks a fresh `triaged_sha` cache), `triage` (automatic,
   lightweight, advisory PR-card context; gated on `auto_triage` and
   `CLAUDE_CODE_OAUTH_TOKEN`; cached once per PR head), `deep-review` (ALWAYS-ON, code-grounded;
