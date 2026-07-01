@@ -167,7 +167,7 @@ def test_claude_steps_split_legacy_vs_search():
         args = str((legacy.get("with") or {}).get("claude_args", "")).strip()
         check(
             "workflow: legacy step keeps the no-shell tool mode and Sonnet alias",
-            args == "--allowedTools Write\n--max-turns 6\n--model sonnet",
+            args == "--allowedTools Write\n--max-turns 32\n--model sonnet",
         )
         check(
             "workflow: legacy step has no GH_TOKEN env",

@@ -555,7 +555,7 @@ def test_triage_workflow_security_wiring():
         args = str((step.get("with") or {}).get("claude_args", ""))
         check("workflow: Claude action pin matches deep-review", step.get("uses") == CLAUDE_ACTION_PIN)
         check("workflow: Claude uses Sonnet alias", "--model sonnet" in args)
-        check("workflow: Claude max-turns is lower than deep review", "--max-turns 8" in args)
+        check("workflow: Claude max-turns is lower than deep review", "--max-turns 32" in args)
         check("security: Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped)
         check(
             "security: allowed_bots is narrow",
