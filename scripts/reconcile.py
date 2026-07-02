@@ -6,6 +6,9 @@ The safety net behind the event-driven `ingest` path. Given a fresh scan of the
 fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
 
   * opens a decision card for any worklist item that has no open card,
+    reads that freshly-created card back by the issue number returned from
+    `upsert_card`, and queues its first eligible auto-triage attempt in the same
+    pass,
   * refreshes an OPEN `needs-decision` card in place when its target's material
     state changed (head_sha/compliance/tests/kind/priority/options) - so the queue
     reflects current state, not just the snapshot taken when the card was first

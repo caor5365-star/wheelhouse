@@ -11,12 +11,15 @@ card-side activity never re-triggers the handler).
 CLI:
   render_card.py upsert --item-file item.json    create-or-refresh a card (dedup by marker)
   render_card.py render --item-file item.json --out-dir DIR    debug: write title/body/labels
-  render_card.py queue-triage --item-file item.json    mark triage queued and dispatch triage.yml when eligible
+  render_card.py queue-triage --item-file item.json [--issue N]    mark triage queued and dispatch triage.yml when eligible
   render_card.py triage-apply --issue N --revision REV --execution-file FILE    update the card from Claude output
   render_card.py triage-fail --issue N --revision REV --message TEXT    write the auto-triage unavailable section
 
 REV is a PR's head SHA (pr-review) or an issue's `updatedAt` (issue-triage) -
 whichever revision the auto-triage cache is keyed on for that card's kind.
+When `upsert` runs under GitHub Actions it writes `issue=N` to `$GITHUB_OUTPUT`;
+pass that number to `queue-triage --issue N` so a newly-created card is read
+back by number instead of through the read-after-write-racy label listing.
 """
 
 import argparse
@@ -633,7 +636,11 @@ def ensure_labels(labels):
 def find_card(marker):
     """Find the open card for this target. Returns {number, body, labels} (the
     full row, so the caller can diff state + labels without a second fetch), or
-    None if no open card exists."""
+    None if no open card exists.
+
+    Do not use this to read back a card just created in the same pass; the
+    underlying label-filtered issue listing is not read-after-write consistent.
+    Use the issue number returned by `upsert_card` with `get_card` instead."""
     r = _gh(
         [
             "issue",

@@ -7,6 +7,7 @@ Nothing here is required to run the machine, and nothing here changes how Wheelh
 The scheduled scan applies Wheelhouse's owner/maintainer/bot author filter, but this explicit dispatch path trusts the source workflow and does not re-check author type, so only dispatch items you want carded.
 The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase nudges; explicit dispatches do not, so the backstop may later consume a dispatched PR-review card for a PR GitHub reports as `CONFLICTING`.
 For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config and token gates as the scheduled scan.
+That includes a newly created card: the hub threads the issue number from the upsert step into the queueing step and reads the card back by number, so the first eligible triage attempt is queued in the same run.
 For issue-triage, a new `updated_at` can queue a fresh attempt even when no full card refresh is needed.
 
 > You add these files to **your source repos**, not to Wheelhouse.
@@ -55,6 +56,7 @@ A stale render version can also apply internal card-body repairs, such as qualif
 Title, summary, and recommendation updates ride along with a material or render-version refresh, but do not rewrite an existing card by themselves.
 Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh cannot clobber an in-flight or consumed decision.
 When auto triage is eligible, the hub writes `triaged_sha` for the current revision before dispatching `triage.yml`, so a failed or timed-out run is still the only attempt for that PR head SHA or issue `updatedAt`.
+For a newly created card, that queueing happens in the same ingest run, not only on the later hourly scan.
 
 > **Legacy event type.** Before the rename to Wheelhouse the event type was `triage-item`. `ingest.yml` still listens for both (`types: [wheelhouse-item, triage-item]`), so a source repo wired up before the rename keeps working - but new dispatchers should send `wheelhouse-item`.
 
