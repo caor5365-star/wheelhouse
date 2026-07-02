@@ -482,6 +482,18 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   `Bash(wheelhouse-search)` allow-list so it can run scoped read-only `gh`
   searches across the target repo and configured fleet repos for related,
   duplicate, or superseding PRs/issues and code context.
+  Because `READONLY_TOKEN` is a fine-grained, public-read PAT, it cannot answer
+  `claude-code-action`'s own `GET .../collaborators/{actor}/permission`
+  triggering-actor check, so that read-only branch also sets
+  `allowed_non_write_users: ${{ github.event.sender.login }}` to bypass that
+  check - narrowly, for the exact sender the workflow's own `steps.gate`
+  (`wheelhouse_core.py authorized`) has already proven is the owner or
+  configured maintainer, never `'*'`. That workflow gate remains the real
+  trust boundary; the action's built-in check is redundant once it has run.
+  This does not touch what token the model can act with - `github_token`/
+  `GH_TOKEN` stay `READONLY_TOKEN`, so the model still cannot write anywhere.
+  Do not widen `allowed_non_write_users` to `'*'` or drop the `steps.gate`
+  authorization it relies on.
   The prompt carries the card's prior thread as owner-scoped conversation history
   so follow-up questions keep continuity (see the conversation-memory bullet in
   Sharp edges for the trusted-author rule).
