@@ -1252,6 +1252,268 @@ def parse_state_block(body):
 
 
 # --------------------------------------------------------------------------- #
+# cross-repo reference qualification (shared util)
+# --------------------------------------------------------------------------- #
+# Decision cards live in THIS (cards) repo, but their target is a DIFFERENT
+# repo. A bare `#N` in model-generated free text that lands on a card would be
+# autolinked by GitHub to an issue/PR in the CARDS repo, not the target - a
+# wrong, misleading link. Every surface that renders/posts model free text
+# onto a card must rewrite bare refs to `owner/repo#N` via this function
+# before the text is displayed. `owner`/`repo` MUST come from deterministic
+# card state (`GITHUB_REPOSITORY_OWNER` + the card's `state["repo"]`), never
+# from the model's own output - the model only ever supplies `text`.
+#
+# Match a `#N` only where GitHub itself would autolink it as a same-repo
+# reference: at start-of-string, or preceded by a character that is not part
+# of an existing `owner/repo#`/`GH-`/word-adjacent-`#` pattern, and not
+# followed by another word character (so `#123abc` is left alone). This
+# leaves already-qualified `owner/repo#N`, full URLs, markdown-link destination
+# URLs, Markdown code, and incidental `#` uses (e.g. a URL fragment
+# `page#123`) untouched.
+_ISSUE_REF_RE = re.compile(r"(?<![\w/#-])#(\d+)(?!\w)")
+
+
+def _markdown_link_destination_spans(text):
+    spans = []
+    i = 0
+    while True:
+        marker = text.find("](", i)
+        if marker < 0:
+            return spans
+        label_start = text.rfind("[", 0, marker)
+        if label_start < 0:
+            i = marker + 2
+            continue
+        start = marker + 2
+        depth = 0
+        j = start
+        while j < len(text):
+            ch = text[j]
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    spans.append((start, j))
+                    i = j + 1
+                    break
+                depth -= 1
+            j += 1
+        else:
+            i = marker + 2
+
+
+def _markdown_reference_link_destination_spans(text):
+    spans = []
+    pos = 0
+    while pos < len(text):
+        newline = text.find("\n", pos)
+        if newline < 0:
+            line_end = len(text)
+            next_pos = len(text)
+        else:
+            line_end = newline
+            next_pos = newline + 1
+        line = text[pos:line_end]
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if indent <= 3 and stripped.startswith("["):
+            close = 1
+            while close < len(stripped):
+                if stripped[close] == "\\":
+                    close += 2
+                    continue
+                if stripped[close] == "]":
+                    break
+                close += 1
+            if close < len(stripped) and close + 1 < len(stripped) and stripped[close + 1] == ":":
+                start = pos + indent + close + 2
+                while start < line_end and text[start] in " \t":
+                    start += 1
+                dest_line_end = line_end
+                if start >= line_end and newline >= 0:
+                    start = next_pos
+                    dest_line_newline = text.find("\n", start)
+                    if dest_line_newline < 0:
+                        dest_line_end = len(text)
+                    else:
+                        dest_line_end = dest_line_newline
+                    while start < dest_line_end and text[start] in " \t":
+                        start += 1
+                if start < dest_line_end:
+                    if text[start] == "<":
+                        end = start + 1
+                        while end < dest_line_end:
+                            if text[end] == "\\":
+                                end += 2
+                                continue
+                            if text[end] == ">":
+                                end += 1
+                                break
+                            end += 1
+                    else:
+                        end = start
+                        while end < dest_line_end and text[end] not in " \t":
+                            if text[end] == "\\":
+                                end += 2
+                            else:
+                                end += 1
+                    spans.append((start, end))
+        pos = next_pos
+    return spans
+
+
+def _markdown_code_span_spans(text):
+    spans = []
+    i = 0
+    while i < len(text):
+        if text[i] != "`":
+            i += 1
+            continue
+        start = i
+        while i < len(text) and text[i] == "`":
+            i += 1
+        ticks = i - start
+        needle = "`" * ticks
+        close = text.find(needle, i)
+        while close >= 0:
+            before = close > 0 and text[close - 1] == "`"
+            after = close + ticks < len(text) and text[close + ticks] == "`"
+            if not before and not after:
+                spans.append((start, close + ticks))
+                i = close + ticks
+                break
+            close = text.find(needle, close + 1)
+        else:
+            i = start + ticks
+    return spans
+
+
+def _markdown_fenced_code_spans(text):
+    spans = []
+    fence = None
+    pos = 0
+    while pos < len(text):
+        newline = text.find("\n", pos)
+        if newline < 0:
+            line_end = len(text)
+        else:
+            line_end = newline + 1
+        line = text[pos:line_end].rstrip("\r\n")
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if indent <= 3 and stripped:
+            char = stripped[0]
+            if fence:
+                fence_char, fence_len, fence_start = fence
+                if char == fence_char:
+                    run = 0
+                    while run < len(stripped) and stripped[run] == fence_char:
+                        run += 1
+                    if run >= fence_len and not stripped[run:].strip():
+                        spans.append((fence_start, line_end))
+                        fence = None
+            elif char in ("`", "~"):
+                run = 0
+                while run < len(stripped) and stripped[run] == char:
+                    run += 1
+                if run >= 3 and not (char == "`" and "`" in stripped[run:]):
+                    fence = (char, run, pos)
+        pos = line_end
+    if fence:
+        spans.append((fence[2], len(text)))
+    return spans
+
+
+def _markdown_indent_width(line):
+    width = 0
+    for ch in line:
+        if ch == " ":
+            width += 1
+        elif ch == "\t":
+            width += 4 - (width % 4)
+        else:
+            break
+    return width
+
+
+def _markdown_indented_code_spans(text):
+    spans = []
+    pos = 0
+    block_start = None
+    previous_blank = True
+    while pos < len(text):
+        newline = text.find("\n", pos)
+        if newline < 0:
+            line_end = len(text)
+            next_pos = len(text)
+        else:
+            line_end = newline + 1
+            next_pos = line_end
+        line = text[pos:line_end].rstrip("\r\n")
+        blank = not line.strip(" \t")
+        indented = not blank and _markdown_indent_width(line) >= 4
+        if block_start is not None:
+            if not indented and not blank:
+                spans.append((block_start, pos))
+                block_start = None
+            elif indented or blank:
+                pos = next_pos
+                previous_blank = blank
+                continue
+        if block_start is None and indented and previous_blank:
+            block_start = pos
+        previous_blank = blank
+        pos = next_pos
+    if block_start is not None:
+        spans.append((block_start, len(text)))
+    return spans
+
+
+def _merge_spans(spans):
+    merged = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _markdown_protected_spans(text):
+    return _merge_spans(
+        _markdown_link_destination_spans(text)
+        + _markdown_reference_link_destination_spans(text)
+        + _markdown_code_span_spans(text)
+        + _markdown_fenced_code_spans(text)
+        + _markdown_indented_code_spans(text)
+    )
+
+
+def qualify_issue_refs(text, owner, repo):
+    """Rewrite bare `#N` GitHub-autolink references in `text` to fully
+    qualified `owner/repo#N`. Null/empty-safe and idempotent."""
+    if not text or not owner or not repo:
+        return text or ""
+    repl = "%s/%s#\\1" % (owner, repo)
+    spans = _markdown_protected_spans(text)
+    if not spans:
+        return _ISSUE_REF_RE.sub(repl, text)
+    qualified = []
+    pos = 0
+    for start, end in spans:
+        qualified.append(_ISSUE_REF_RE.sub(repl, text[pos:start]))
+        qualified.append(text[start:end])
+        pos = end
+    qualified.append(_ISSUE_REF_RE.sub(repl, text[pos:]))
+    return "".join(qualified)
+
+
+# --------------------------------------------------------------------------- #
 # security-gated CI approval (ported exit-4 HOLD) + shared safety verdict
 # --------------------------------------------------------------------------- #
 # `ci_safety` is the ONE security definition. Both the scan-time auto-approve
