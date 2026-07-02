@@ -78,6 +78,15 @@ def test_urls_and_markdown_links_untouched():
         "a markdown link URL containing #N is untouched",
         core.qualify_issue_refs("[link](url#127)", "acme", "repo") == "[link](url#127)",
     )
+    check(
+        "a fragment-only markdown link URL is untouched",
+        core.qualify_issue_refs("[details](#127)", "acme", "repo") == "[details](#127)",
+    )
+    check(
+        "bare refs after markdown links are still qualified",
+        core.qualify_issue_refs("[details](#127) and #128", "acme", "repo")
+        == "[details](#127) and acme/repo#128",
+    )
 
 
 def test_non_reference_hash_uses_untouched():
@@ -120,6 +129,7 @@ def test_idempotent():
         "already-qualified owner/other#5 stays",
         "see https://github.com/o/r/issues/127",
         "[link](url#127)",
+        "[details](#127)",
         "GH-123 unrelated",
         "#123abc not a ref",
         "#127 and #128 both",

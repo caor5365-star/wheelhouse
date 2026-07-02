@@ -1267,9 +1267,41 @@ def parse_state_block(body):
 # reference: at start-of-string, or preceded by a character that is not part
 # of an existing `owner/repo#`/`GH-`/word-adjacent-`#` pattern, and not
 # followed by another word character (so `#123abc` is left alone). This
-# leaves already-qualified `owner/repo#N`, full URLs, markdown-link URLs, and
-# incidental `#` uses (e.g. a URL fragment `page#123`) untouched.
+# leaves already-qualified `owner/repo#N`, full URLs, markdown-link destination
+# URLs, and incidental `#` uses (e.g. a URL fragment `page#123`) untouched.
 _ISSUE_REF_RE = re.compile(r"(?<![\w/#-])#(\d+)(?!\w)")
+
+
+def _markdown_link_destination_spans(text):
+    spans = []
+    i = 0
+    while True:
+        marker = text.find("](", i)
+        if marker < 0:
+            return spans
+        label_start = text.rfind("[", 0, marker)
+        if label_start < 0:
+            i = marker + 2
+            continue
+        start = marker + 2
+        depth = 0
+        j = start
+        while j < len(text):
+            ch = text[j]
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    spans.append((start, j))
+                    i = j + 1
+                    break
+                depth -= 1
+            j += 1
+        else:
+            i = marker + 2
 
 
 def qualify_issue_refs(text, owner, repo):
@@ -1277,7 +1309,18 @@ def qualify_issue_refs(text, owner, repo):
     qualified `owner/repo#N`. Null/empty-safe and idempotent."""
     if not text or not owner or not repo:
         return text or ""
-    return _ISSUE_REF_RE.sub("%s/%s#\\1" % (owner, repo), text)
+    repl = "%s/%s#\\1" % (owner, repo)
+    spans = _markdown_link_destination_spans(text)
+    if not spans:
+        return _ISSUE_REF_RE.sub(repl, text)
+    qualified = []
+    pos = 0
+    for start, end in spans:
+        qualified.append(_ISSUE_REF_RE.sub(repl, text[pos:start]))
+        qualified.append(text[start:end])
+        pos = end
+    qualified.append(_ISSUE_REF_RE.sub(repl, text[pos:]))
+    return "".join(qualified)
 
 
 # --------------------------------------------------------------------------- #
