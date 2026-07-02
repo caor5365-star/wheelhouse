@@ -34,6 +34,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 The deterministic core (ingest + decision-handler + scan-backstop) runs with a single secret and no LLM.
 Three Claude-powered features layer on top, all gated by a Claude subscription token: **auto triage** adds lightweight Summary / Product implications / Recommended next step context to PR-review cards (`auto_triage`) and issue-triage cards (the independent `auto_triage_issues`), **deep-review** is always available when you tick a card's *Investigate* box for a code-grounded read of the target, and the opt-in `nl_decisions` lets you drive a card in plain English.
 All three LLM features can also use an optional `READONLY_TOKEN` for scoped read-only search across the target repo and configured fleet repos.
+When model-authored text lands back on a Wheelhouse decision card, bare GitHub `#N` references are qualified to the target repo before posting so they do not autolink to the Wheelhouse repo.
 
 ## Setup - a numbered checklist
 
@@ -166,6 +167,9 @@ When `READONLY_TOKEN` is absent, `nl_decisions` runs with the `Write` tool only,
 Auto triage and deep review's no-token branches run with Read/Grep/Glob only, no shell tools, and no model `GH_TOKEN`.
 When `READONLY_TOKEN` is present, search-enabled Claude steps receive it as GitHub CLI credentials for the scoped search wrapper.
 Auto triage's GitHub write is the workflow-owned card edit, deep review's GitHub write is the workflow-owned card comment, `nl_decisions` actions are performed by the deterministic handler, and `READONLY_TOKEN` never authorizes an action.
+Before auto-triage text, deep-review verdicts, or plain-English answer/clarify replies are posted back on a decision card, trusted workflow code rewrites bare GitHub `#N` refs to the target repo's `<owner>/<repo>#N` using deterministic card state, never the model's own text.
+Already-qualified refs, URLs, Markdown link destinations, and code spans/blocks are left alone; the prompts ask Claude to write qualified refs too, but the rewrite is the guarantee.
+The merge thank-you comment is intentionally outside that rewrite because it is posted on the target PR itself.
 Deep review goes a step further: it explores the target's checked-out code without executing it, with **no `FLEET_TOKEN` left on disk** and **no ability to run the target's code**, so even a malicious PR can at worst produce a wrong verdict, never a compromise (see [Security notes](#security-notes)).
 
 ### 5. Onboard your repos
@@ -285,13 +289,16 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
   For `nl_decisions`, the search-enabled Claude step also passes `allowed_non_write_users` for the exact sender already authorized by Wheelhouse's owner/maintainer gate, because the public-read `READONLY_TOKEN` cannot satisfy `claude-code-action`'s redundant collaborator-permission check.
   For `nl_decisions`, every action-shaped result is re-validated against the per-kind allowlist before the deterministic handler acts, and the workflow preserves only `decision.json` before routing/executing from a read-only trusted source copy.
   For deep review, the trusted workflow posts the action-output verdict and no deterministic downstream step reads model-written files.
+- **Cross-repo refs in LLM card text.** Auto triage summaries, deep-review verdicts, and `nl_decisions` answer/clarify replies are posted on this repo's decision cards while referring to a different target repo.
+  Before those strings are rendered or posted, trusted code qualifies model-written bare GitHub `#N` refs to `<owner>/<repo>#N` with `GITHUB_REPOSITORY_OWNER` and the card state's target repo.
+  The model cannot redirect that slug by naming a repo in its output, and the deterministic rewrite is the guarantee even though the prompts also ask for fully-qualified refs.
 - **Deep review is code-grounded but sandboxed.** To review the real code, deep review checks out the target repo into the runner using `FLEET_TOKEN` - but only for the clone, with `persist-credentials: false`, so **no token is ever written to disk**.
   The Claude step that follows never gets `FLEET_TOKEN`.
   Without `READONLY_TOKEN`, it gets this repo's token and is restricted to **read-only** tools (`Read`/`Grep`/`Glob`) with **no shell**.
   With `READONLY_TOKEN`, it gets only that read token for GitHub CLI credentials, may write only the `search-request.json` request file, and may run only `wheelhouse-search` for scoped read-only lookup.
   It cannot build, test, install, or otherwise execute the target's code.
   Because Investigate dispatches this workflow with `github.token`, the Claude action allows only `github-actions[bot]` as a bot actor; wildcard or external bot actors are not allowed.
-  The workflow captures Claude's final response from the action output and posts the verdict with the default token.
+  The workflow captures Claude's final response from the action output, then posts the verdict from a read-only trusted source snapshot with a scrubbed environment and the default token.
   So a malicious PR that tries to prompt-inject through its own source can at worst produce a wrong verdict comment - never run code or exfiltrate a secret.
   The Investigate trigger is owner/maintainer-gated like every other acting path, while direct manual label and issue-only workflow runs remain repo-owner-only.
 - **Public = world-readable.** A public Wheelhouse repo makes your queue and decisions visible to everyone. That transparency is a feature, but state it plainly to yourself before listing private work here; use a private repo if you need it.
@@ -359,22 +366,23 @@ wheelhouse.config.yml          the one file you edit
   deep-review.yml              always-on, code-grounded: Investigate box / label / manual issue run -> read-only target review -> workflow posts Claude's verdict
   no-mistakes-required.yml     PR-to-main gate requiring the no-mistakes signature
 scripts/
-  wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, merge-conflict nudges, CI safety, auto-approval, and scan logs
+  wheelhouse_core.py           GraphQL scan, classify, author filtering, dedup/overlap, merge-conflict nudges, CI safety, auto-approval, ref qualification, and scan logs
   render_card.py               build decision cards; create/refresh/close cards; queue/update auto triage
   apply_decision.py            parse a tick/slash/label/plain-English comment, execute it on the target repo
   nl_readonly_search.py        optional READONLY_TOKEN search wrapper for LLM context
   build_item.py                normalize a dispatch payload into a card item
   reconcile.py                 backstop: open new cards, refresh stale pending cards, close consumed ones
-tests/test_decision.py         offline unit test for the parse/route logic (mocks the LLM), incl. investigate routing
-tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search and actor-check wiring
+tests/test_decision.py         offline unit test for parse/route logic, investigate routing, and NL answer ref qualification
+tests/test_nl_decisions_search.py offline unit test for optional nl_decisions read-only search, actor-check wiring, and ref-qualification prompt/env wiring
 tests/test_card_refresh.py     offline unit test for refresh change detection, guards, and labels
 tests/test_reconcile.py        offline unit test for reconcile routing and self-healing
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, and stale-card self-healing
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, and logging
 tests/test_author_filter.py    offline unit test for queue author filtering and skipped-card CI handling
-tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, dispatch, and workflow isolation
-tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring
+tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, dispatch, ref qualification, and workflow isolation
+tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
+tests/test_qualify_refs.py     offline unit test for shared bare `#N` -> `<owner>/<repo>#N` qualification
 docs/ONBOARDING.md             how to wire a source repo's dispatch (the fast path)
 ```
 
