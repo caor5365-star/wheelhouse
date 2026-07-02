@@ -482,6 +482,18 @@ The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on th
   `Bash(wheelhouse-search)` allow-list so it can run scoped read-only `gh`
   searches across the target repo and configured fleet repos for related,
   duplicate, or superseding PRs/issues and code context.
+  Because `READONLY_TOKEN` is a fine-grained, public-read PAT, it cannot answer
+  `claude-code-action`'s own `GET .../collaborators/{actor}/permission`
+  triggering-actor check, so that read-only branch also sets
+  `allowed_non_write_users: ${{ github.event.sender.login }}` to bypass that
+  check - narrowly, for the exact sender the workflow's own `steps.gate`
+  (`wheelhouse_core.py authorized`) has already proven is the owner or
+  configured maintainer, never `'*'`. That workflow gate remains the real
+  trust boundary; the action's built-in check is redundant once it has run.
+  This does not touch what token the model can act with - `github_token`/
+  `GH_TOKEN` stay `READONLY_TOKEN`, so the model still cannot write anywhere.
+  Do not widen `allowed_non_write_users` to `'*'` or drop the `steps.gate`
+  authorization it relies on.
   The prompt carries the card's prior thread as owner-scoped conversation history
   so follow-up questions keep continuity (see the conversation-memory bullet in
   Sharp edges for the trusted-author rule).
@@ -509,7 +521,7 @@ No build step.
 Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
 - `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, and the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none).
-- `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, token isolation, prompt gating, and unchanged `nl-route`/`execute` boundary.
+- `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, and unchanged `nl-route`/`execute` boundary.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network.
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, and reconcile self-healing for conflicted PR cards, no network.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Offline wiring checks for the natural-language decision agent's optional
-READONLY_TOKEN search capability. NO network, NO live LLM.
+READONLY_TOKEN search capability and scoped actor-check bypass.
+NO network, NO live LLM.
 
 Run: python tests/test_nl_decisions_search.py   (needs PyYAML)
 """
@@ -178,6 +179,11 @@ def test_claude_steps_split_legacy_vs_search():
             (legacy.get("with") or {}).get("github_token") == "${{ github.token }}",
         )
         check(
+            "workflow: legacy step needs no actor-check bypass (github.token can "
+            "already read collaborator permissions)",
+            "allowed_non_write_users" not in (legacy.get("with") or {}),
+        )
+        check(
             "workflow: legacy step never receives FLEET_TOKEN or READONLY_TOKEN",
             "FLEET_TOKEN" not in dumped and "READONLY_TOKEN" not in dumped,
         )
@@ -206,6 +212,24 @@ def test_claude_steps_split_legacy_vs_search():
         check(
             "workflow: search step does not receive the default write token",
             "${{ github.token }}" not in dumped,
+        )
+        gate = step_by_id(steps, "gate")
+        gate_sender = (gate.get("env") or {}).get("SENDER") if gate else None
+        allowed_non_write = (search.get("with") or {}).get("allowed_non_write_users")
+        check(
+            "workflow: search step bypasses the action's own actor-permission "
+            "check (which READONLY_TOKEN cannot satisfy) for the already-"
+            "gate-authorized sender only",
+            allowed_non_write == "${{ github.event.sender.login }}",
+        )
+        check(
+            "workflow: allowed_non_write_users targets the SAME sender expression "
+            "the workflow's own owner/maintainer gate already authorized",
+            gate_sender is not None and allowed_non_write == gate_sender,
+        )
+        check(
+            "workflow: search step never bypasses the actor check for everyone ('*')",
+            allowed_non_write != "*",
         )
         check(
             "workflow: search step never receives FLEET_TOKEN",

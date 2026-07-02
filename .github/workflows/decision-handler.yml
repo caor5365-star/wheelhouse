@@ -238,6 +238,20 @@ jobs:
       # and any resulting output is treated by the prompt as UNTRUSTED DATA.
       # Auth is the Claude subscription token, NOT an API key.
       #
+      # allowed_non_write_users bypasses claude-code-action's OWN triggering-actor
+      # write-permission check (which otherwise calls GET .../collaborators/{actor}/
+      # permission using the github_token input - a call READONLY_TOKEN, being a
+      # fine-grained public-read PAT, cannot make, so it 403s and kills the run
+      # before Claude ever sees the prompt). That built-in check is redundant here:
+      # this step only runs once `steps.gate.outputs.authorized == 'true'`, i.e.
+      # `wheelhouse_core.py authorized` has already proven github.event.sender.login
+      # is the repo owner or the configured maintainer - the workflow's own gate IS
+      # the trust boundary. Scoping the bypass to that exact, already-authorized
+      # sender (never '*') keeps this narrow: it does not let any other actor skip
+      # the check, and it does not change what token the model can act with -
+      # github_token/GH_TOKEN stay READONLY_TOKEN, so the model remains unable to
+      # write anywhere. See AGENTS.md's nl_decisions section for the full model.
+      #
       # NOTE: keep this action pinned to the same reviewed release as deep-review.yml.
       - name: Claude interprets intent (read-only search)
         if: ${{ steps.nl-gate.outputs.proceed == 'true' && steps.nl-readonly.outputs.enabled == 'true' }}
@@ -247,6 +261,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.READONLY_TOKEN }}
+          allowed_non_write_users: ${{ github.event.sender.login }}
           prompt: ${{ steps.nl-prompt.outputs.prompt }}
           claude_args: |
             --allowedTools "Write,Bash(wheelhouse-search)"
