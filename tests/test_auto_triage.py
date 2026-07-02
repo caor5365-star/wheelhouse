@@ -635,6 +635,32 @@ def test_body_helpers_queue_and_apply_result_for_issue():
     check("queue(issue): hidden status is queued", queued_state.get("triage_status") == "queued")
     check("queue(issue): no visible triage section yet", "### Triage" not in queued)
 
+    old = item_issue(updated_at="2024-01-01T00:00:00Z")
+    old_body = rc.body_with_triage_queued(rc.render(old)["body"], old)
+    advanced = item_issue(updated_at="2024-06-01T00:00:00Z")
+    requeued = rc.body_with_triage_queued(old_body, advanced)
+    requeued_state = core.parse_state_block(requeued)
+    check("queue(issue): advanced updated_at rewrites the card state", requeued != old_body)
+    check(
+        "queue(issue): state updated_at advances before dispatch",
+        requeued_state.get("updated_at") == advanced["updated_at"],
+    )
+    check(
+        "queue(issue): triaged_sha advances with updated_at",
+        requeued_state.get("triaged_sha") == advanced["updated_at"],
+    )
+
+    legacy_state = core.parse_state_block(body)
+    legacy_state.pop("updated_at", None)
+    legacy_body = rc._replace_state_block(body, legacy_state)
+    legacy_queued = rc.body_with_triage_queued(legacy_body, advanced)
+    legacy_queued_state = core.parse_state_block(legacy_queued)
+    check("queue(issue): legacy card without updated_at can queue", legacy_queued != legacy_body)
+    check(
+        "queue(issue): legacy card backfills updated_at",
+        legacy_queued_state.get("updated_at") == advanced["updated_at"],
+    )
+
     updated = rc.body_with_triage_result(
         queued,
         it["updated_at"],

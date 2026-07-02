@@ -419,11 +419,14 @@ def body_with_triage_queued(body, item):
     state = parse_state_block(body)
     kind = item.get("kind", "pr-review")
     revision = _triage_revision(item)
-    if (
-        not state
-        or state.get("kind") != kind
-        or state_revision(state, kind) != revision
-    ):
+    if not state or kind not in AUTO_TRIAGE_FLAG_BY_KIND or state.get("kind") != kind:
+        return body
+    if not revision:
+        return body
+    if kind == "issue-triage":
+        state = dict(state)
+        state["updated_at"] = revision
+    elif state_revision(state, kind) != revision:
         return body
     clean = remove_triage_section(body)
     return _replace_state_block(clean, _state_with_triage(state, revision, "queued"))
