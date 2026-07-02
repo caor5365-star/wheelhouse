@@ -369,8 +369,7 @@ def triage_section(triage=None, error=None, owner="", repo=""):
     lines = [TRIAGE_START, "### Triage", ""]
     if triage:
         lines.append(
-            "- **Summary:** %s"
-            % qualify_issue_refs(triage["summary"], owner, repo)
+            "- **Summary:** %s" % qualify_issue_refs(triage["summary"], owner, repo)
         )
         lines.append(
             "- **Product implications:** %s"
@@ -1015,7 +1014,9 @@ def main():
         result_text = extract_claude_result(args.execution_file)
         triage = parse_triage_json(result_text)
         if triage:
-            if update_card_triage(args.issue, args.revision, triage=triage, owner=owner):
+            if update_card_triage(
+                args.issue, args.revision, triage=triage, owner=owner
+            ):
                 print("updated auto triage on card #%s" % args.issue)
             else:
                 print("auto triage result skipped for card #%s" % args.issue)
@@ -1046,7 +1047,9 @@ def main():
             else:
                 card = find_card(marker_label(item))
                 if not card:
-                    print("auto triage skipped: no open card for %s" % marker_label(item))
+                    print(
+                        "auto triage skipped: no open card for %s" % marker_label(item)
+                    )
                     return
                 current = get_card(card["number"])
             if not current or not issue_is_open(current):

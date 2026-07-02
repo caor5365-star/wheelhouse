@@ -225,8 +225,14 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
 
 
 def test_auto_triage_config_default_and_overrides():
-    check("config: auto_triage default true helper", core._auto_triage_enabled({}, True) is True)
-    check("config: global false disables auto_triage", core._auto_triage_enabled({}, False) is False)
+    check(
+        "config: auto_triage default true helper",
+        core._auto_triage_enabled({}, True) is True,
+    )
+    check(
+        "config: global false disables auto_triage",
+        core._auto_triage_enabled({}, False) is False,
+    )
     check(
         "config: per-repo false overrides global true",
         core._auto_triage_enabled({"auto_triage": False}, True) is False,
@@ -284,7 +290,9 @@ def test_build_item_carries_effective_auto_triage():
         build_item.load_config = old_load
     check("build_item: per-repo auto_triage false carried", off["auto_triage"] is False)
     check("build_item: global default true carried", default_on["auto_triage"] is True)
-    check("build_item: string false payload is false", payload_off["auto_triage"] is False)
+    check(
+        "build_item: string false payload is false", payload_off["auto_triage"] is False
+    )
     check(
         "build_item: payload true cannot override config false",
         payload_on_still_off["auto_triage"] is False,
@@ -359,11 +367,23 @@ def test_render_triage_section_has_no_mentions_and_caches_sha():
     body = rc.render(triaged)["body"]
     state = core.parse_state_block(body)
     check("render: triage section exists", "### Triage" in body)
-    check("render: triage has Summary", "**Summary:** Updates alice-facing copy." in body)
-    check("render: triage strips @mentions", "@alice" not in body and "@bob" not in body)
-    check("render: triage does not replace Recommended action", "### Recommended action" in body)
-    check("state: triaged_sha caches the current head", state.get("triaged_sha") == "abc1234def")
-    check("state: triage status is succeeded", state.get("triage_status") == "succeeded")
+    check(
+        "render: triage has Summary", "**Summary:** Updates alice-facing copy." in body
+    )
+    check(
+        "render: triage strips @mentions", "@alice" not in body and "@bob" not in body
+    )
+    check(
+        "render: triage does not replace Recommended action",
+        "### Recommended action" in body,
+    )
+    check(
+        "state: triaged_sha caches the current head",
+        state.get("triaged_sha") == "abc1234def",
+    )
+    check(
+        "state: triage status is succeeded", state.get("triage_status") == "succeeded"
+    )
 
 
 def test_render_triage_section_qualifies_cross_repo_refs():
@@ -388,8 +408,13 @@ def test_render_triage_section_qualifies_cross_repo_refs():
         else:
             os.environ["GITHUB_REPOSITORY_OWNER"] = prior
     check("render: triage qualifies target repo refs", "acme/wheelhouse#127" in body)
-    check("render: triage qualifies every ref in the field", "acme/wheelhouse#128" in body)
-    check("render: no bare #127 survives", "acme/wheelhouse#127" in body and " #127" not in body)
+    check(
+        "render: triage qualifies every ref in the field", "acme/wheelhouse#128" in body
+    )
+    check(
+        "render: no bare #127 survives",
+        "acme/wheelhouse#127" in body and " #127" not in body,
+    )
 
 
 def test_triage_section_owner_repo_drive_qualification_not_model_text():
@@ -451,7 +476,10 @@ def test_recommended_next_step_is_conservative_when_unexpected():
 
 def test_triage_requires_complete_structured_json():
     check("parse: empty object rejected", rc.normalize_triage({}) is None)
-    check("parse: error object rejected", rc.normalize_triage({"error": "timeout"}) is None)
+    check(
+        "parse: error object rejected",
+        rc.normalize_triage({"error": "timeout"}) is None,
+    )
     check(
         "parse: missing expected field rejected",
         rc.normalize_triage(
@@ -484,7 +512,10 @@ def test_triage_requires_complete_structured_json():
         )
         is None,
     )
-    check("parse: error JSON text rejected", rc.parse_triage_json('{"error":"timeout"}') is None)
+    check(
+        "parse: error JSON text rejected",
+        rc.parse_triage_json('{"error":"timeout"}') is None,
+    )
 
 
 def test_body_helpers_queue_and_apply_result():
@@ -492,8 +523,13 @@ def test_body_helpers_queue_and_apply_result():
     body = rc.render(it)["body"]
     queued = rc.body_with_triage_queued(body, it)
     queued_state = core.parse_state_block(queued)
-    check("queue: hidden triaged_sha is written", queued_state.get("triaged_sha") == it["head_sha"])
-    check("queue: hidden status is queued", queued_state.get("triage_status") == "queued")
+    check(
+        "queue: hidden triaged_sha is written",
+        queued_state.get("triaged_sha") == it["head_sha"],
+    )
+    check(
+        "queue: hidden status is queued", queued_state.get("triage_status") == "queued"
+    )
     check("queue: no visible triage section yet", "### Triage" not in queued)
 
     updated = rc.body_with_triage_result(
@@ -537,15 +573,20 @@ def test_should_auto_triage_cache_and_gates():
     )
     check(
         "gate: config false skips triage",
-        rc.should_auto_triage(item(auto_triage=False), state_of(it), pure, True) is False,
+        rc.should_auto_triage(item(auto_triage=False), state_of(it), pure, True)
+        is False,
     )
     check(
         "gate: non-pr-review skips triage",
-        rc.should_auto_triage(item(kind="ci-approval"), state_of(it), pure, True) is False,
+        rc.should_auto_triage(item(kind="ci-approval"), state_of(it), pure, True)
+        is False,
     )
     check(
         "gate: processing card skips triage",
-        rc.should_auto_triage(it, state_of(it), labels("needs-decision", "processing"), True) is False,
+        rc.should_auto_triage(
+            it, state_of(it), labels("needs-decision", "processing"), True
+        )
+        is False,
     )
 
 
@@ -553,12 +594,16 @@ def test_triage_queued_for_head_requires_matching_queued_attempt():
     head = "abc1234def"
     check(
         "queued gate: matching queued attempt passes",
-        rc.triage_queued_for_head({"triaged_sha": head, "triage_status": "queued"}, head)
+        rc.triage_queued_for_head(
+            {"triaged_sha": head, "triage_status": "queued"}, head
+        )
         is True,
     )
     check(
         "queued gate: succeeded attempt skips duplicate dispatch",
-        rc.triage_queued_for_head({"triaged_sha": head, "triage_status": "succeeded"}, head)
+        rc.triage_queued_for_head(
+            {"triaged_sha": head, "triage_status": "succeeded"}, head
+        )
         is False,
     )
     check(
@@ -572,7 +617,9 @@ def test_triage_queued_for_head_requires_matching_queued_attempt():
     )
     check(
         "queued gate: different head skips dispatch",
-        rc.triage_queued_for_head({"triaged_sha": "oldsha", "triage_status": "queued"}, head)
+        rc.triage_queued_for_head(
+            {"triaged_sha": "oldsha", "triage_status": "queued"}, head
+        )
         is False,
     )
 
@@ -582,7 +629,10 @@ def test_reconcile_backfills_legacy_card_without_material_change():
     calls = run_reconcile(scan_payload([it]), [card_row(it)])
     check("reconcile: unchanged legacy card is not refreshed", calls["upsert"] == [])
     check("reconcile: unchanged legacy card is marked queued", len(calls["mark"]) == 1)
-    check("reconcile: unchanged legacy card dispatches triage", len(calls["dispatch"]) == 1)
+    check(
+        "reconcile: unchanged legacy card dispatches triage",
+        len(calls["dispatch"]) == 1,
+    )
 
 
 def test_reconcile_skips_when_fresh_token_absent_or_config_off():
@@ -717,7 +767,11 @@ def test_queue_triage_command_warns_on_dispatch_failure():
     current = card_row(it)
 
     def fake_find(marker):
-        return {"number": current["number"], "body": current["body"], "labels": current["labels"]}
+        return {
+            "number": current["number"],
+            "body": current["body"],
+            "labels": current["labels"],
+        }
 
     def fake_get(number):
         return current
@@ -759,8 +813,13 @@ def test_queue_triage_command_warns_on_dispatch_failure():
             rc.dispatch_triage_workflow,
         ) = old
 
-    check("queue cli: dispatch failure warns", "::warning::failed to queue auto triage" in out)
-    check("queue cli: queued cache was still written", "triage_status" in current["body"])
+    check(
+        "queue cli: dispatch failure warns",
+        "::warning::failed to queue auto triage" in out,
+    )
+    check(
+        "queue cli: queued cache was still written", "triage_status" in current["body"]
+    )
 
 
 def test_reconcile_queues_after_head_refresh():
@@ -770,7 +829,9 @@ def test_reconcile_queues_after_head_refresh():
     new = item(head_sha="newsha999", auto_triage=True)
     calls = run_reconcile(scan_payload([new]), [old_card])
     check("reconcile: new head refreshes the card", len(calls["upsert"]) == 1)
-    check("reconcile: new head queues triage after refresh", len(calls["dispatch"]) == 1)
+    check(
+        "reconcile: new head queues triage after refresh", len(calls["dispatch"]) == 1
+    )
     check(
         "reconcile: queued triage uses the new head",
         calls["dispatch"] and calls["dispatch"][0]["item"]["head_sha"] == "newsha999",
@@ -788,7 +849,10 @@ def test_render_issue_triage_section_has_no_mentions_and_caches_revision():
     body = rc.render(triaged)["body"]
     state = core.parse_state_block(body)
     check("render(issue): triage section exists", "### Triage" in body)
-    check("render(issue): triage strips @mentions", "@alice" not in body and "@bob" not in body)
+    check(
+        "render(issue): triage strips @mentions",
+        "@alice" not in body and "@bob" not in body,
+    )
     check(
         "render(issue): triage does not replace Recommended action",
         "### Recommended action" in body,
@@ -797,8 +861,14 @@ def test_render_issue_triage_section_has_no_mentions_and_caches_revision():
         "state(issue): triaged_sha caches the current updated_at revision",
         state.get("triaged_sha") == triaged["updated_at"],
     )
-    check("state(issue): triage status is succeeded", state.get("triage_status") == "succeeded")
-    check("state(issue): state carries updated_at", state.get("updated_at") == triaged["updated_at"])
+    check(
+        "state(issue): triage status is succeeded",
+        state.get("triage_status") == "succeeded",
+    )
+    check(
+        "state(issue): state carries updated_at",
+        state.get("updated_at") == triaged["updated_at"],
+    )
     check(
         "state(issue): updated_at is not a material field",
         "updated_at" not in rc.MATERIAL_FIELDS,
@@ -814,7 +884,10 @@ def test_body_helpers_queue_and_apply_result_for_issue():
         "queue(issue): hidden triaged_sha is the updated_at revision",
         queued_state.get("triaged_sha") == it["updated_at"],
     )
-    check("queue(issue): hidden status is queued", queued_state.get("triage_status") == "queued")
+    check(
+        "queue(issue): hidden status is queued",
+        queued_state.get("triage_status") == "queued",
+    )
     check("queue(issue): no visible triage section yet", "### Triage" not in queued)
 
     old = item_issue(updated_at="2024-01-01T00:00:00Z")
@@ -822,7 +895,10 @@ def test_body_helpers_queue_and_apply_result_for_issue():
     advanced = item_issue(updated_at="2024-06-01T00:00:00Z")
     requeued = rc.body_with_triage_queued(old_body, advanced)
     requeued_state = core.parse_state_block(requeued)
-    check("queue(issue): advanced updated_at rewrites the card state", requeued != old_body)
+    check(
+        "queue(issue): advanced updated_at rewrites the card state",
+        requeued != old_body,
+    )
     check(
         "queue(issue): state updated_at advances before dispatch",
         requeued_state.get("updated_at") == advanced["updated_at"],
@@ -840,7 +916,10 @@ def test_body_helpers_queue_and_apply_result_for_issue():
     legacy_body = rc._replace_state_block(body, legacy_state)
     legacy_queued = rc.body_with_triage_queued(legacy_body, advanced)
     legacy_queued_state = core.parse_state_block(legacy_queued)
-    check("queue(issue): legacy card without updated_at can queue", legacy_queued != legacy_body)
+    check(
+        "queue(issue): legacy card without updated_at can queue",
+        legacy_queued != legacy_body,
+    )
     check(
         "queue(issue): legacy card backfills updated_at",
         legacy_queued_state.get("updated_at") == advanced["updated_at"],
@@ -861,7 +940,10 @@ def test_body_helpers_queue_and_apply_result_for_issue():
         "result(issue): triage sits before recommended action",
         updated.find("### Triage") < updated.find("### Recommended action"),
     )
-    check("result(issue): status succeeded", updated_state.get("triage_status") == "succeeded")
+    check(
+        "result(issue): status succeeded",
+        updated_state.get("triage_status") == "succeeded",
+    )
 
     # A stale revision (the issue moved on since queuing) must not be applied.
     stale_result = rc.body_with_triage_result(
@@ -910,7 +992,9 @@ def test_should_auto_triage_cache_and_gates_for_issue():
     )
     check(
         "gate(issue): auto_triage_issues false skips triage",
-        rc.should_auto_triage(item_issue(auto_triage_issues=False), state_of(it), pure, True)
+        rc.should_auto_triage(
+            item_issue(auto_triage_issues=False), state_of(it), pure, True
+        )
         is False,
     )
     check(
@@ -922,16 +1006,21 @@ def test_should_auto_triage_cache_and_gates_for_issue():
     )
     check(
         "gate(issue): missing updated_at skips triage",
-        rc.should_auto_triage(item_issue(updated_at=""), state_of(it), pure, True) is False,
+        rc.should_auto_triage(item_issue(updated_at=""), state_of(it), pure, True)
+        is False,
     )
     check(
         "independence: auto_triage=False on an issue item does not gate issue-triage",
-        rc.should_auto_triage(item_issue(auto_triage=False), state_of(it), pure, True) is True,
+        rc.should_auto_triage(item_issue(auto_triage=False), state_of(it), pure, True)
+        is True,
     )
     check(
         "independence: auto_triage_issues=False on a pr-review item does not gate pr-review",
         rc.should_auto_triage(
-            item(auto_triage_issues=False), state_of(item()), labels("needs-decision", "kind:pr-review"), True
+            item(auto_triage_issues=False),
+            state_of(item()),
+            labels("needs-decision", "kind:pr-review"),
+            True,
         )
         is True,
     )
@@ -943,9 +1032,18 @@ def test_reconcile_backfills_legacy_issue_card_without_material_change():
         scan_payload([it], open_pr_numbers=(), open_issue_numbers=(42,)),
         [card_row(it)],
     )
-    check("reconcile(issue): unchanged legacy card is not refreshed", calls["upsert"] == [])
-    check("reconcile(issue): unchanged legacy card is marked queued", len(calls["mark"]) == 1)
-    check("reconcile(issue): unchanged legacy card dispatches triage", len(calls["dispatch"]) == 1)
+    check(
+        "reconcile(issue): unchanged legacy card is not refreshed",
+        calls["upsert"] == [],
+    )
+    check(
+        "reconcile(issue): unchanged legacy card is marked queued",
+        len(calls["mark"]) == 1,
+    )
+    check(
+        "reconcile(issue): unchanged legacy card dispatches triage",
+        len(calls["dispatch"]) == 1,
+    )
 
 
 def test_reconcile_skips_when_fresh_token_absent_or_config_off_for_issue():
@@ -963,9 +1061,18 @@ def test_reconcile_skips_when_fresh_token_absent_or_config_off_for_issue():
         ),
         [card_row(it)],
     )
-    check("reconcile(issue): fresh triaged_sha skips dispatch", fresh_calls["dispatch"] == [])
-    check("reconcile(issue): token absent skips dispatch", no_token_calls["dispatch"] == [])
-    check("reconcile(issue): config off skips dispatch", config_off_calls["dispatch"] == [])
+    check(
+        "reconcile(issue): fresh triaged_sha skips dispatch",
+        fresh_calls["dispatch"] == [],
+    )
+    check(
+        "reconcile(issue): token absent skips dispatch",
+        no_token_calls["dispatch"] == [],
+    )
+    check(
+        "reconcile(issue): config off skips dispatch",
+        config_off_calls["dispatch"] == [],
+    )
 
 
 def test_reconcile_queues_after_issue_updated_at_advance():
@@ -1040,7 +1147,10 @@ def test_triage_workflow_issue_path_isolation():
     prepare = step_by_id(steps, "prepare")
     claude_steps = [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
 
-    check("workflow: kind input exists and is required", inputs.get("kind", {}).get("required") is True)
+    check(
+        "workflow: kind input exists and is required",
+        inputs.get("kind", {}).get("required") is True,
+    )
     check(
         "workflow: head_sha input is optional (pr-review only)",
         inputs.get("head_sha", {}).get("required") is False,
@@ -1073,7 +1183,7 @@ def test_triage_workflow_issue_path_isolation():
         )
         check(
             "workflow: issue-triage validates an ISO8601 updatedAt revision",
-            "REVISION=\"$INPUT_REVISION\"" in run
+            'REVISION="$INPUT_REVISION"' in run
             and r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" in run,
         )
         check(
@@ -1097,7 +1207,8 @@ def test_triage_workflow_issue_path_isolation():
     if verify_head:
         check(
             "workflow: verify_head only runs for pr-review (issue-triage has no head to verify)",
-            "steps.resolve.outputs.kind == 'pr-review'" in str(verify_head.get("if", "")),
+            "steps.resolve.outputs.kind == 'pr-review'"
+            in str(verify_head.get("if", "")),
         )
 
     checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
@@ -1121,8 +1232,7 @@ def test_triage_workflow_issue_path_isolation():
         run = str(prepare.get("run", ""))
         check(
             "workflow: prepare fetches issue title/body/comments for issue-triage",
-            'gh issue view "$NUMBER" -R "$SLUG"' in run
-            and "## Comments" in run,
+            'gh issue view "$NUMBER" -R "$SLUG"' in run and "## Comments" in run,
         )
         check(
             "workflow: prepare fetches PR title/body/diff for pr-review",
@@ -1147,7 +1257,10 @@ def test_triage_workflow_issue_path_isolation():
     )
     for step in claude_steps:
         dumped = yaml.safe_dump(step)
-        check("security(issue path): Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped)
+        check(
+            "security(issue path): Claude never receives FLEET_TOKEN",
+            "FLEET_TOKEN" not in dumped,
+        )
         check(
             "security(issue path): allowed_bots stays narrow",
             (step.get("with") or {}).get("allowed_bots") == "github-actions[bot]",
@@ -1163,7 +1276,7 @@ def test_triage_workflow_issue_path_isolation():
 
     check(
         "workflow: final card update passes --revision (kind-agnostic CLI arg)",
-        "--revision \"$REVISION\"" in text,
+        '--revision "$REVISION"' in text,
     )
     check(
         "workflow: final card update no longer uses the old --head-sha flag name",
@@ -1185,7 +1298,9 @@ def test_triage_workflow_security_wiring():
     check(
         "workflow: every checkout disables credential persistence",
         checkouts
-        and all((s.get("with") or {}).get("persist-credentials") is False for s in checkouts),
+        and all(
+            (s.get("with") or {}).get("persist-credentials") is False for s in checkouts
+        ),
     )
     target_checkout = next(
         (
@@ -1234,27 +1349,44 @@ def test_triage_workflow_security_wiring():
         )
 
     claude_steps = [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
-    check("workflow: search and no-search Claude branches exist", len(claude_steps) == 2)
+    check(
+        "workflow: search and no-search Claude branches exist", len(claude_steps) == 2
+    )
     for step in claude_steps:
         dumped = yaml.safe_dump(step)
         args = str((step.get("with") or {}).get("claude_args", ""))
-        check("workflow: Claude action pin matches deep-review", step.get("uses") == CLAUDE_ACTION_PIN)
+        check(
+            "workflow: Claude action pin matches deep-review",
+            step.get("uses") == CLAUDE_ACTION_PIN,
+        )
         check("workflow: Claude uses Sonnet alias", "--model sonnet" in args)
-        check("workflow: Claude max-turns is lower than deep review", "--max-turns 32" in args)
-        check("security: Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped)
+        check(
+            "workflow: Claude max-turns is lower than deep review",
+            "--max-turns 32" in args,
+        )
+        check(
+            "security: Claude never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped
+        )
         check(
             "security: allowed_bots is narrow",
             (step.get("with") or {}).get("allowed_bots") == "github-actions[bot]",
         )
-        check("security: no arbitrary bot allow-list", (step.get("with") or {}).get("allowed_bots") != "*")
-        check("workflow: Claude failures are fail-open", step.get("continue-on-error") is True)
+        check(
+            "security: no arbitrary bot allow-list",
+            (step.get("with") or {}).get("allowed_bots") != "*",
+        )
+        check(
+            "workflow: Claude failures are fail-open",
+            step.get("continue-on-error") is True,
+        )
 
     search = next(s for s in claude_steps if s.get("id") == "claude_search")
     legacy = next(s for s in claude_steps if s.get("id") == "claude")
     check(
         "security: search branch receives READONLY_TOKEN only",
         search.get("env", {}).get("GH_TOKEN") == "${{ secrets.READONLY_TOKEN }}"
-        and (search.get("with") or {}).get("github_token") == "${{ secrets.READONLY_TOKEN }}",
+        and (search.get("with") or {}).get("github_token")
+        == "${{ secrets.READONLY_TOKEN }}",
     )
     check(
         "security: legacy branch has no shell and no GH_TOKEN env",
@@ -1290,7 +1422,8 @@ def test_triage_workflow_security_wiring():
         )
         check(
             "workflow: target diff is not captured unbounded",
-            'gh pr diff "$NUMBER" -R "$SLUG" || echo "(could not fetch diff)"' not in run,
+            'gh pr diff "$NUMBER" -R "$SLUG" || echo "(could not fetch diff)"'
+            not in run,
         )
 
     check("workflow: triage result handoff exists", preserve is not None)
@@ -1341,7 +1474,8 @@ def test_triage_workflow_security_wiring():
         )
         check(
             "workflow: final card update reads isolated result file",
-            env.get("TRIAGE_EXECUTION_FILE") == "${{ steps.triage-result.outputs.path }}",
+            env.get("TRIAGE_EXECUTION_FILE")
+            == "${{ steps.triage-result.outputs.path }}",
         )
         check(
             "workflow: final card update carries gh repo context",
@@ -1370,7 +1504,10 @@ def test_triage_workflow_security_wiring():
             "scripts/render_card.py triage-apply" in run
             and "scripts/render_card.py triage-fail" in run,
         )
-        check("workflow: final card update never receives FLEET_TOKEN", "FLEET_TOKEN" not in dumped)
+        check(
+            "workflow: final card update never receives FLEET_TOKEN",
+            "FLEET_TOKEN" not in dumped,
+        )
         check(
             "workflow: final card update carries GITHUB_REPOSITORY_OWNER for ref qualification",
             env.get("GITHUB_REPOSITORY_OWNER") == "${{ github.repository_owner }}",
@@ -1393,11 +1530,15 @@ def test_triage_workflow_security_wiring():
     ]
     check(
         "workflow: trusted source is prepared before Claude",
-        trusted_i is not None and claude_indexes and all(trusted_i < i for i in claude_indexes),
+        trusted_i is not None
+        and claude_indexes
+        and all(trusted_i < i for i in claude_indexes),
     )
     check(
         "workflow: triage result handoff runs after Claude",
-        preserve_i is not None and claude_indexes and all(i < preserve_i for i in claude_indexes),
+        preserve_i is not None
+        and claude_indexes
+        and all(i < preserve_i for i in claude_indexes),
     )
     check(
         "workflow: trusted card update runs after isolated handoff",
@@ -1411,8 +1552,14 @@ def test_scan_and_ingest_can_dispatch_with_default_token():
     scan_text = read(".github", "workflows", "scan-backstop.yml")
     list_cards = step_by_name(scan["jobs"]["reconcile"]["steps"], "List open cards")
     list_cards_run = list_cards.get("run", "") if list_cards else ""
-    check("scan-backstop: actions write permission for dispatch", scan["permissions"].get("actions") == "write")
-    check("ingest: actions write permission for dispatch", ingest["permissions"].get("actions") == "write")
+    check(
+        "scan-backstop: actions write permission for dispatch",
+        scan["permissions"].get("actions") == "write",
+    )
+    check(
+        "ingest: actions write permission for dispatch",
+        ingest["permissions"].get("actions") == "write",
+    )
     check(
         "scan-backstop: token-present env gates reconcile dispatch",
         "WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN" in scan_text,
@@ -1435,7 +1582,8 @@ def test_scan_and_ingest_can_dispatch_with_default_token():
     check(
         "ingest: queues auto triage only when gate says token exists",
         "auto-triage-gate" in read(".github", "workflows", "ingest.yml")
-        and "steps.auto-triage-gate.outputs.has_token == 'true'" in read(".github", "workflows", "ingest.yml")
+        and "steps.auto-triage-gate.outputs.has_token == 'true'"
+        in read(".github", "workflows", "ingest.yml")
         and "queue-triage" in read(".github", "workflows", "ingest.yml"),
     )
 
