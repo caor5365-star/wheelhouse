@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wheelhouse_core import parse_state_block  # noqa: E402
@@ -229,6 +230,28 @@ def state_revision(state, kind):
     return (state or {}).get("head_sha", "") or ""
 
 
+def _parse_issue_revision(value):
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _issue_revision_is_older(revision, state):
+    stored = state_revision(state, "issue-triage")
+    if not revision or not stored:
+        return False
+    incoming = _parse_issue_revision(revision)
+    current = _parse_issue_revision(stored)
+    return bool(incoming and current and incoming < current)
+
+
 def triage_fresh(item, state):
     """True when the card has already attempted auto-triage for this item's
     current revision (a PR's head SHA, or an issue's `updatedAt`).
@@ -264,7 +287,10 @@ def should_auto_triage(item, state, labels, has_token=True):
         return False
     if not is_refreshable(labels):
         return False
-    if not _triage_revision(item):
+    revision = _triage_revision(item)
+    if not revision:
+        return False
+    if kind == "issue-triage" and _issue_revision_is_older(revision, state):
         return False
     return not triage_fresh(item, state)
 
@@ -424,6 +450,8 @@ def body_with_triage_queued(body, item):
     if not revision:
         return body
     if kind == "issue-triage":
+        if _issue_revision_is_older(revision, state):
+            return body
         state = dict(state)
         state["updated_at"] = revision
     elif state_revision(state, kind) != revision:

@@ -197,6 +197,8 @@ def main():
         r = repos.get(repo)
         if not r or not r.get("ok"):
             continue
+        if r.get("truncated"):
+            continue
         number = int(state.get("number", 0))
         kind = state.get("kind", "pr-review")
         open_set = set(

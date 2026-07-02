@@ -649,6 +649,9 @@ def test_body_helpers_queue_and_apply_result_for_issue():
         "queue(issue): triaged_sha advances with updated_at",
         requeued_state.get("triaged_sha") == advanced["updated_at"],
     )
+    stale = item_issue(updated_at="2024-02-01T00:00:00Z")
+    rolled_back = rc.body_with_triage_queued(requeued, stale)
+    check("queue(issue): stale updated_at does not roll back", rolled_back == requeued)
 
     legacy_state = core.parse_state_block(body)
     legacy_state.pop("updated_at", None)
@@ -707,6 +710,17 @@ def test_should_auto_triage_cache_and_gates_for_issue():
     check(
         "cache(issue): advanced updated_at with old triaged_sha needs triage",
         rc.should_auto_triage(it, stale_state, pure, has_token=True) is True,
+    )
+    newer_state = dict(
+        state_of(item_issue(updated_at="2024-06-01T00:00:00Z")),
+        triaged_sha="2024-06-01T00:00:00Z",
+    )
+    check(
+        "cache(issue): older incoming updated_at skips triage",
+        rc.should_auto_triage(
+            item_issue(updated_at="2024-02-01T00:00:00Z"), newer_state, pure, True
+        )
+        is False,
     )
     check(
         "gate(issue): token absent skips triage",
