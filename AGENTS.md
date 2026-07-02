@@ -171,8 +171,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   self-terminating propagation shape as the earlier author `@mention` drop:
   every pre-existing card refreshes once, gets its cached triage refs
   qualified and its `render_version` stamped to `2`, and the next scan is a
-  full no-op. The `TRIAGE_START`/`### Triage`/`TRIAGE_END` markers contain no
-  `#N` so qualifying the whole section string leaves them intact. The shared pure helpers live in `render_card.py`
+  full no-op.
+  The `TRIAGE_START`/`### Triage`/`TRIAGE_END` markers contain no
+  `#N` so qualifying the whole section string leaves them intact.
+  The shared pure helpers live in `render_card.py`
   (`material_changed`, `render_stale`, `is_refreshable`, `plan_label_update`); `reconcile.py`
   pre-checks them (using the card row it already listed) so the common
   no-change case never hits the API, and `upsert_card` re-checks them before it
@@ -462,7 +464,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   `GITHUB_REPOSITORY_OWNER` and `repo` is always the TARGET repo name from the
   card's deterministic state (`state["repo"]`) - NEVER derived from the
   model's own output, so the model cannot redirect qualification by naming a
-  different repo in its text. The three surfaces: (1) auto-triage -
+  different repo in its text.
+  The three live model-output surfaces: (1) auto-triage -
   `render_card.py`'s `triage_section`/`body_with_triage_result` thread
   `owner`+`state["repo"]` through before rendering the `### Triage` block (the
   `triage-apply`/`triage-fail` CLI read `GITHUB_REPOSITORY_OWNER` and
@@ -477,7 +480,12 @@ still appears where it's plain English, e.g. "triage the queue".)
   `steps.route.outputs.answer` is already qualified by the time
   decision-handler.yml's "Post NL reply" step posts it - `cmd_nl_route` reads
   `GITHUB_REPOSITORY_OWNER` from env and the `route` step in
-  decision-handler.yml passes it through its own `env -i` sandbox. All three
+  decision-handler.yml passes it through its own `env -i` sandbox.
+  The same helper also runs during `_preserve_same_revision_triage` on
+  same-revision refreshes, so cached pre-qualification `### Triage` sections in
+  already-open cards are repaired before being reinserted; this is a card-body
+  sweep only and does not rewrite historical card comments.
+  All three
   prompts (`triage.yml`, `deep-review.yml`, and the NL prompt in
   `apply_decision.build_nl_prompt`) also carry a defense-in-depth instruction
   telling the model to write refs as `owner/repo#N`, never bare - but the
