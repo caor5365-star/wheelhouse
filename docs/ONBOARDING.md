@@ -21,6 +21,7 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `number`         | yes      | the PR or issue number                                             |
 | `kind`           | no       | `pr-review` (default), `ci-approval`, or `issue-triage`            |
 | `head_sha`       | no       | the PR head SHA - recommended; lets the hub refuse a stale merge   |
+| `updated_at`     | no       | the issue's `updatedAt` revision (issue-triage only) - recommended; enables automatic issue-card triage caching (issues have no head SHA) |
 | `title`          | no       | short title of the target                                          |
 | `author`         | no       | the PR/issue author's login                                        |
 | `comp`           | no       | compliance status shown on the card                               |
@@ -29,7 +30,8 @@ A source repo notifies the hub by sending a `repository_dispatch` event with **e
 | `recommendation` | no       | recommended action shown on the card                              |
 | `priority`       | no       | `high` / `med` / `low`                                             |
 | `options`        | no       | comma-separated checkbox option keys (defaults follow `kind`; see below) |
-| `auto_triage`    | no       | `false` opts this dispatched item out of automatic PR-card triage  |
+| `auto_triage`    | no       | `false` opts this dispatched pr-review item out of automatic PR-card triage |
+| `auto_triage_issues` | no   | `false` opts this dispatched issue-triage item out of automatic issue-card triage (independent of `auto_triage`) |
 
 The `author` field is display data for dispatched cards.
 It is rendered as plain text (`by <login>`), not as a GitHub `@mention`, so a dispatched card does not notify the target author.
@@ -38,6 +40,8 @@ The `auto_triage` field is an item-level opt-out only.
 Omit it to follow the hub's global and per-repo `auto_triage` config.
 Set it to `false` for high-volume or sensitive dispatched PR-review items that should not spend a Claude turn.
 It cannot force auto triage on when the hub or repo config disables it.
+`auto_triage_issues` is the INDEPENDENT equivalent for dispatched `issue-triage` items - same item-level-opt-out-only rule, own global/per-repo config, never affects `auto_triage` or vice versa.
+Since issues have no head SHA, pass `updated_at` on an `issue-triage` dispatch (the issue's `updatedAt`) so the hub can cache the triage attempt the same way it caches PR triage by `head_sha`; omit it and the item is simply never eligible for automatic issue triage.
 
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
 `investigate` is non-consuming: it triggers the code-grounded deep-review workflow, clears the box, and leaves the card open for the real decision.

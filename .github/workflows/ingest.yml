@@ -32,6 +32,9 @@ on:
       head_sha:
         description: "PR head SHA (recommended for pr-review/ci-approval)"
         required: false
+      updated_at:
+        description: "Issue updatedAt revision (recommended for issue-triage; enables auto-triage caching)"
+        required: false
       title:
         description: "Short title of the target"
         required: false
@@ -83,6 +86,7 @@ jobs:
           INPUT_NUMBER: ${{ github.event.inputs.number }}
           INPUT_KIND: ${{ github.event.inputs.kind }}
           INPUT_HEAD_SHA: ${{ github.event.inputs.head_sha }}
+          INPUT_UPDATED_AT: ${{ github.event.inputs.updated_at }}
           INPUT_TITLE: ${{ github.event.inputs.title }}
           INPUT_SUMMARY: ${{ github.event.inputs.summary }}
           INPUT_RECOMMENDATION: ${{ github.event.inputs.recommendation }}

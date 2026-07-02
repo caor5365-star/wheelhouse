@@ -32,7 +32,8 @@ Usage:
   wheelhouse_core.py checks <repo>        list distinct check names on a repo's PRs (onboarding)
   wheelhouse_core.py authorized           print true/false: is $SENDER allowed to drive decisions?
   wheelhouse_core.py nl-decisions-enabled print true/false: is nl_decisions on in config?
-  wheelhouse_core.py auto-triage-enabled <repo> print true/false for one configured repo
+  wheelhouse_core.py auto-triage-enabled <repo> print true/false for one configured repo (pr-review)
+  wheelhouse_core.py auto-triage-issues-enabled <repo> print true/false for one configured repo (issue-triage)
   wheelhouse_core.py state <field>        print one field of the state block in $ISSUE_BODY
   wheelhouse_core.py repos                list configured repos
 
@@ -146,6 +147,9 @@ def load_config():
         # Advisory LLM triage is DEFAULT ON when the Claude token exists. The
         # flag is only a spend-control opt-out; absence keeps fresh forks useful.
         "auto_triage": bool(cfg.get("auto_triage", True)),
+        # Same idea, but for issue-triage cards. Independent of `auto_triage`:
+        # either can be toggled off without affecting the other.
+        "auto_triage_issues": bool(cfg.get("auto_triage_issues", True)),
     }
 
 
@@ -429,9 +433,20 @@ def _auto_triage_enabled(repo_cfg, global_default):
     """Effective auto_triage for one repo, mirroring auto_approve_ci.
 
     Default ON keeps a fresh fork useful once CLAUDE_CODE_OAUTH_TOKEN is present;
-    the global or per-repo false value is a token-spend opt-out.
+    the global or per-repo false value is a token-spend opt-out. This governs
+    pr-review cards ONLY - see `_auto_triage_issues_enabled` for issue-triage.
     """
     v = repo_cfg.get("auto_triage")
+    return global_default if v is None else bool(v)
+
+
+def _auto_triage_issues_enabled(repo_cfg, global_default):
+    """Effective auto_triage_issues for one repo, mirroring _auto_triage_enabled.
+
+    Independent of `auto_triage`: this governs issue-triage cards ONLY, so
+    toggling either flag (globally or per-repo) never affects the other.
+    """
+    v = repo_cfg.get("auto_triage_issues")
     return global_default if v is None else bool(v)
 
 
@@ -665,7 +680,14 @@ def _auto_approve_or_card(
     return (False, _ci_safety_note(verdict), log_note)
 
 
-def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=True):
+def build_repo(
+    owner,
+    repo_cfg,
+    card_issues,
+    auto_approve_ci=True,
+    auto_triage=True,
+    auto_triage_issues=True,
+):
     """Scan one repo. Returns (repo_result, items).
 
     Decision cards are for other people's work, so scan-built PR-review and
@@ -674,7 +696,9 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
 
     `auto_approve_ci` is the fleet-wide default (config `auto_approve_ci`, itself
     defaulting True); a repo may override it per-repo. `auto_triage` mirrors that
-    model for the advisory Claude pass on pr-review cards. Same-repo PRs with no CI
+    model for the advisory Claude pass on pr-review cards, and `auto_triage_issues`
+    is the INDEPENDENT equivalent for issue-triage cards (its own global/per-repo
+    default, never affected by `auto_triage` or vice versa). Same-repo PRs with no CI
     signal route to normal review, not CI approval. Unknown fork status keeps a
     manual CI-approval card with no auto-approve attempt for contributor-authored
     PRs and logs a suppressed card for owner/maintainer/bot-authored PRs. When
@@ -750,6 +774,7 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
 
     auto_enabled = _auto_approve_enabled(repo_cfg, auto_approve_ci)
     triage_enabled = _auto_triage_enabled(repo_cfg, auto_triage)
+    triage_issues_enabled = _auto_triage_issues_enabled(repo_cfg, auto_triage_issues)
     default_posture = None
 
     items = []
@@ -859,6 +884,10 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
                     "number": it["number"],
                     "kind": "issue-triage",
                     "head_sha": "",
+                    # Issues have no head SHA, so auto-triage caches against
+                    # `updatedAt` instead - it advances on any edit or new
+                    # comment and is otherwise stable.
+                    "updated_at": it.get("updatedAt", "") or "",
                     "title": it["title"],
                     "author": _author_login(author) or "?",
                     "bucket": "issue-triage",
@@ -868,6 +897,7 @@ def build_repo(owner, repo_cfg, card_issues, auto_approve_ci=True, auto_triage=T
                     "summary": "open issue, no linked PR",
                     "recommendation": _recommendation("issue-triage"),
                     "priority": PRIORITY["issue-triage"],
+                    "auto_triage_issues": triage_issues_enabled,
                 }
             )
 
@@ -1476,6 +1506,7 @@ def cmd_scan(only_repo=None):
             cfg["card_issues"],
             cfg["auto_approve_ci"],
             cfg["auto_triage"],
+            cfg["auto_triage_issues"],
         )
         out_repos[name] = result
         items.extend(repo_items)
@@ -1488,6 +1519,7 @@ def cmd_scan(only_repo=None):
         "card_issues": cfg["card_issues"],
         "auto_approve_ci": cfg["auto_approve_ci"],
         "auto_triage": cfg["auto_triage"],
+        "auto_triage_issues": cfg["auto_triage_issues"],
         "repos": out_repos,
         "items": items,
     }
@@ -1581,6 +1613,17 @@ def cmd_auto_triage_enabled(repo):
     )
 
 
+def cmd_auto_triage_issues_enabled(repo):
+    cfg = load_config()
+    if repo not in cfg["repos"]:
+        sys.exit("unknown repo '%s'" % repo)
+    print(
+        "true"
+        if _auto_triage_issues_enabled(cfg["repos"][repo], cfg["auto_triage_issues"])
+        else "false"
+    )
+
+
 def cmd_state(field):
     """Print one field of the state block in $ISSUE_BODY (for the deep-review workflow)."""
     st = parse_state_block(os.environ.get("ISSUE_BODY", ""))
@@ -1603,6 +1646,8 @@ def main():
         cmd_nl_decisions_enabled()
     elif cmd == "auto-triage-enabled" and len(sys.argv) == 3:
         cmd_auto_triage_enabled(sys.argv[2])
+    elif cmd == "auto-triage-issues-enabled" and len(sys.argv) == 3:
+        cmd_auto_triage_issues_enabled(sys.argv[2])
     elif cmd == "state" and len(sys.argv) == 3:
         cmd_state(sys.argv[2])
     elif cmd == "repos":
