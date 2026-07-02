@@ -87,6 +87,26 @@ def test_urls_and_markdown_links_untouched():
         core.qualify_issue_refs("[details](#127) and #128", "acme", "repo")
         == "[details](#127) and acme/repo#128",
     )
+    check(
+        "a reference-style markdown link URL is untouched",
+        core.qualify_issue_refs("[details]: #127", "acme", "repo")
+        == "[details]: #127",
+    )
+    check(
+        "a bracketed reference-style markdown link URL is untouched",
+        core.qualify_issue_refs("[details]: <#127>", "acme", "repo")
+        == "[details]: <#127>",
+    )
+    check(
+        "bare refs after reference-style markdown links are still qualified",
+        core.qualify_issue_refs("[details]: #127\nand #128", "acme", "repo")
+        == "[details]: #127\nand acme/repo#128",
+    )
+    check(
+        "a next-line reference-style markdown link URL is untouched",
+        core.qualify_issue_refs("[details]:\n  #127\nand #128", "acme", "repo")
+        == "[details]:\n  #127\nand acme/repo#128",
+    )
 
 
 def test_markdown_code_untouched():
@@ -133,6 +153,21 @@ def test_markdown_code_untouched():
         "unclosed fenced code blocks are protected through end of text",
         core.qualify_issue_refs(unclosed_fence, "acme", "repo") == unclosed_fence,
     )
+    check(
+        "bare refs inside indented code blocks are untouched",
+        core.qualify_issue_refs("    #127\nthen #128", "acme", "repo")
+        == "    #127\nthen acme/repo#128",
+    )
+    check(
+        "bare refs inside tab-indented code blocks are untouched",
+        core.qualify_issue_refs("\t#127\nthen #128", "acme", "repo")
+        == "\t#127\nthen acme/repo#128",
+    )
+    check(
+        "indented lines that continue paragraphs are still qualified",
+        core.qualify_issue_refs("before\n    #127", "acme", "repo")
+        == "before\n    acme/repo#127",
+    )
 
 
 def test_non_reference_hash_uses_untouched():
@@ -176,6 +211,9 @@ def test_idempotent():
         "see https://github.com/o/r/issues/127",
         "[link](url#127)",
         "[details](#127)",
+        "[details]: #127",
+        "[details]:\n  #127\nand #128",
+        "    #127\nthen #128",
         "use `#127` then #128",
         "```\n#127\n```\n#128",
         "GH-123 unrelated",
