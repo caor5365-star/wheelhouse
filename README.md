@@ -102,9 +102,10 @@ thank_on_merge: true      # post a friendly @-mention thank-you on a merged cont
 
 > **Heads-up - `thank_on_merge` defaults ON (no Claude token needed).**
 > When this key is absent it is treated as `true`, so merging a fleet contributor's PR through a decision card - checkbox *Merge* or a natural-language "merge it" - posts one short, friendly comment on that PR that `@`-mentions the contributor.
+> The thank-you side effect itself does not use Claude; a plain-English "merge it" still requires `nl_decisions` and `CLAUDE_CODE_OAUTH_TOKEN`.
 > It is the one sanctioned contributor `@`-mention: your own decision cards never `@`-mention a target's author, but this comment is posted on the *contributor's* PR, where a thank-you `@`-mention is normal OSS etiquette.
 > Owner, configured-maintainer, and bot authors are never thanked or `@`-mentioned.
-> Customize the wording with `thank_on_merge_message` (an `{author}` placeholder is replaced with the contributor's `@login`), globally or per repo; unset it to use the built-in default.
+> Customize the wording with `thank_on_merge_message` (`{author}` is replaced with the contributor's bare login, so include `@{author}` when you want the thank-you to mention them), globally or per repo; unset it to use the built-in default.
 > This never affects the merge itself: if posting the comment fails (or the feature is off), the merge still succeeds exactly as before, with no retry and no reversal.
 > Set it to `false` to opt out globally, or add `thank_on_merge: false` to a single `repos:` entry.
 

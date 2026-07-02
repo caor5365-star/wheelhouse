@@ -215,8 +215,9 @@ def load_config():
         # or per-repo) to restore silent merges.
         "thank_on_merge": bool(cfg.get("thank_on_merge", True)),
         # Optional custom wording (an `{author}` placeholder is substituted with
-        # the contributor's `@login`); empty/absent means "use the built-in
-        # default". A per-repo `thank_on_merge_message` override takes precedence.
+        # the contributor's bare login; include `@{author}` in the template when
+        # you want a mention); empty/absent means "use the built-in default".
+        # A per-repo `thank_on_merge_message` override takes precedence.
         "thank_on_merge_message": str(cfg.get("thank_on_merge_message") or "").strip(),
     }
 

@@ -180,7 +180,8 @@ auto_approve_ci: true
 thank_on_merge: true
 
 # Optional custom wording for the thank-you comment above. `{author}` is
-# substituted with the contributor's `@login`; leave unset to use the built-in
-# default ("Thanks @{author} - merged! Really appreciate the contribution.").
+# substituted with the contributor's bare login; include `@{author}` when you
+# want a GitHub mention. Leave unset to use the built-in default ("Thanks
+# @{author} - merged! Really appreciate the contribution.").
 # A per-repo `thank_on_merge_message` (see `repos:` above) overrides this.
 # thank_on_merge_message: "Thanks @{author} - merged! Really appreciate the contribution."

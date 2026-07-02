@@ -330,9 +330,10 @@ def _close_target(slug, number):
 
 
 # Contributor-facing (posted on the TARGET repo's PR, not a card) - no product
-# name, no internal jargon; see CLAUDE.md "Contributor-facing copy". `{author}`
-# is substituted with the trusted `@login` from the fetched PR object, never
-# with any free-text/untrusted content.
+# name, no internal jargon; see AGENTS.md "Contributor-facing copy". `{author}`
+# is substituted with the trusted bare login from the fetched PR object; templates
+# include `@{author}` when they want a GitHub mention. Never use free-text or
+# untrusted target content here.
 DEFAULT_THANK_ON_MERGE_MESSAGE = (
     "Thanks @{author} - merged! Really appreciate the contribution."
 )
