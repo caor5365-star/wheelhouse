@@ -26,7 +26,7 @@ handler).
 Usage:
   reconcile.py scan.json cards.json
 
-cards.json is `gh issue list --state open --json number,body,labels,title`.
+cards.json is an array of open issue rows with number, body, labels, and title.
 """
 
 import json

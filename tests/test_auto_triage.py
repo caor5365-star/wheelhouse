@@ -1213,11 +1213,25 @@ def test_triage_workflow_security_wiring():
 def test_scan_and_ingest_can_dispatch_with_default_token():
     scan = load_yaml(".github", "workflows", "scan-backstop.yml")
     ingest = load_yaml(".github", "workflows", "ingest.yml")
+    scan_text = read(".github", "workflows", "scan-backstop.yml")
+    list_cards = step_by_name(scan["jobs"]["reconcile"]["steps"], "List open cards")
+    list_cards_run = list_cards.get("run", "") if list_cards else ""
     check("scan-backstop: actions write permission for dispatch", scan["permissions"].get("actions") == "write")
     check("ingest: actions write permission for dispatch", ingest["permissions"].get("actions") == "write")
     check(
         "scan-backstop: token-present env gates reconcile dispatch",
-        "WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN" in read(".github", "workflows", "scan-backstop.yml"),
+        "WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN" in scan_text,
+    )
+    check(
+        "scan-backstop: open card listing paginates all pages",
+        list_cards is not None
+        and "gh api --paginate --slurp" in list_cards_run
+        and "per_page=100" in list_cards_run
+        and "--limit 300" not in list_cards_run,
+    )
+    check(
+        "scan-backstop: open card listing excludes pull requests",
+        'select(has("pull_request") | not)' in list_cards_run,
     )
     check(
         "ingest: queues auto triage only when gate says token exists",
