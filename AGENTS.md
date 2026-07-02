@@ -489,12 +489,20 @@ They must not name the product ("Wheelhouse") or use internal-state jargon ("mai
 
 Owner-facing decision cards and comments on **this repo's** issues are the private queue; those may keep the Wheelhouse name and internal vocabulary.
 
+**The one sanctioned contributor `@`-mention.** `do_merge` in `apply_decision.py` posts a short, friendly thank-you comment on a fleet contributor's PR after a successful card-driven merge (checkbox `merge` or NL "merge it"), `@`-mentioning the contributor by `pr["user"]["login"]`.
+This is a deliberate, narrow exception to "never `@`-mention" - that rule is about the owner's private decision cards in *this* repo, never about a comment posted on the *contributor's own* target-repo PR, where a thank-you tag is normal OSS etiquette.
+It is gated by `thank_on_merge` (default true, per-repo override via `wheelhouse_core._thank_on_merge_enabled`, mirroring `auto_approve_ci`); no LLM is involved and `CLAUDE_CODE_OAUTH_TOKEN` is irrelevant to it.
+The message is either the built-in default or the owner's own `thank_on_merge_message` config (an `{author}` placeholder substituted with the trusted login, never with untrusted target content); a per-repo message override wins over the global one (`wheelhouse_core._thank_on_merge_message`).
+Owner, configured-maintainer, and bot (`*[bot]` login suffix) authors are skipped silently, as is a missing/blank author.
+It runs on the same `FLEET_TOKEN` acting path as the merge itself (`_comment_target`, no new token) and strictly AFTER the `PUT .../merge` succeeds - never on already-merged/not-open/head-moved/failed-merge outcomes.
+It is best-effort by construction (`_thank_contributor` swallows every exception to a `::warning::` and always leaves `do_merge`'s success result - `("Merged ...", "resolved")` - untouched): a thank-you failure must never flip a successful merge to `error`/`blocked` or trigger a retry.
+
 ## Validation
 
 No build step.
 Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
-- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, and `clear_checkbox`.
+- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, and the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none).
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, token isolation, prompt gating, and unchanged `nl-route`/`execute` boundary.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network.
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.

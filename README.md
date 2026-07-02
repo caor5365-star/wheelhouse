@@ -20,6 +20,7 @@ PRs to `main` must be raised by `git push no-mistakes`, which writes the signatu
 - **Labels carry state:** `needs-decision` (in the queue), `processing` (a handler is acting), `resolved`, `blocked`, plus metadata labels `repo:<name>`, `kind:<pr-review|ci-approval|issue-triage>`, `priority:<high|med|low>`.
 - **Each issue body is a decision card:** a link to the target, the target author shown as plain text instead of a notifying `@mention`, the situation, an overlap note, a recommended action, and quick-decision checkboxes.
   A hidden HTML comment holds the machine-readable state.
+  The one deliberate exception: merging a fleet contributor's PR through a card posts a friendly, `@`-mentioning thank-you comment *on that PR* (`thank_on_merge`, default on) - good OSS etiquette on the contributor's own PR, distinct from the never-`@`-mention rule for your private decision cards.
 - **GitHub Actions are the handlers:** they create cards, refresh pending cards when their targets change, execute your decisions, and reconcile the queue against live repo state.
 
 ```
@@ -59,6 +60,8 @@ repos:
     # auto_approve_ci: false              # optional per-repo override
     # auto_triage: false                  # optional per-repo LLM spend opt-out (pr-review)
     # auto_triage_issues: false           # optional per-repo LLM spend opt-out (issue-triage)
+    # thank_on_merge: false                # optional per-repo opt-out for the merge thank-you comment
+    # thank_on_merge_message: "Cheers @{author}, this just merged!"  # optional per-repo wording
   - name: my-cli
     compliance_check: null
     test_check_patterns: ["ci", "test"]
@@ -69,6 +72,8 @@ auto_triage_issues: true  # LLM side-job: quick advisory issue-card triage (DEFA
 nl_decisions: false       # LLM side-job: reply to a card in plain English (off by default)
 card_issues: true         # also scan un-addressed issues, not just PRs; owner/maintainer/bot authors are skipped
 auto_approve_ci: true     # auto-approve provably-safe fork-CI runs (DEFAULT ON; see Security notes)
+thank_on_merge: true      # post a friendly @-mention thank-you on a merged contributor PR (DEFAULT ON)
+# thank_on_merge_message: "Thanks @{author} - merged! Really appreciate the contribution."  # optional wording override
 # (Deep review has no flag - it's always available once CLAUDE_CODE_OAUTH_TOKEN is set.)
 ```
 
@@ -94,6 +99,14 @@ auto_approve_ci: true     # auto-approve provably-safe fork-CI runs (DEFAULT ON;
 > Set it to `false` to opt out for contributor PRs (every contributor fork-CI candidate raises a card, as you click to approve each), or add `auto_approve_ci: false` to a single `repos:` entry to opt that one repo out.
 > Owner, maintainer, and bot-authored fork PRs are excluded from the decision queue, so Wheelhouse still runs the safety-gated approve/noop path for safe CI and suppresses their cards.
 > See [Security notes](#security-notes).
+
+> **Heads-up - `thank_on_merge` defaults ON (no Claude token needed).**
+> When this key is absent it is treated as `true`, so merging a fleet contributor's PR through a decision card - checkbox *Merge* or a natural-language "merge it" - posts one short, friendly comment on that PR that `@`-mentions the contributor.
+> It is the one sanctioned contributor `@`-mention: your own decision cards never `@`-mention a target's author, but this comment is posted on the *contributor's* PR, where a thank-you `@`-mention is normal OSS etiquette.
+> Owner, configured-maintainer, and bot authors are never thanked or `@`-mentioned.
+> Customize the wording with `thank_on_merge_message` (an `{author}` placeholder is replaced with the contributor's `@login`), globally or per repo; unset it to use the built-in default.
+> This never affects the merge itself: if posting the comment fails (or the feature is off), the merge still succeeds exactly as before, with no retry and no reversal.
+> Set it to `false` to opt out globally, or add `thank_on_merge: false` to a single `repos:` entry.
 
 Not sure what your check names are?
 After step 6, run the `scan-backstop` workflow and read its logs, or use the `checks` helper locally:
@@ -184,7 +197,7 @@ You drive the queue three ways - whichever fits the decision:
   It needs `CLAUDE_CODE_OAUTH_TOKEN` (see [step 4](#4-optional-add-the-claude-token-for-the-llm-features)); without it the card just gets a one-line "needs token" note.
   The repo owner can also apply the `needs-deep-review` label by hand or run the `deep-review` workflow from Actions with only the card issue number; those manual paths parse the current card body before resolving the target.
 - **Nuanced calls - comment a slash-command.** Reply on the card with one of:
-  - `/merge` - merge the target PR.
+  - `/merge` - merge the target PR. On success, a friendly `@`-mentioning thank-you comment is posted on the PR (opt-out: `thank_on_merge`).
   - `/approve-ci` - approve the fork-CI run (security-gated; CI/action-file changes are held, while non-default bases and `pull_request_target` posture add warnings).
   - `/close` - close the target PR/issue.
   - `/decline <reason>` - post your reason on the target, then close it.
