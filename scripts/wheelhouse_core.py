@@ -37,6 +37,7 @@ Usage:
   wheelhouse_core.py nl-decisions-enabled print true/false: is nl_decisions on in config?
   wheelhouse_core.py auto-triage-enabled <repo> print true/false for one configured repo (pr-review)
   wheelhouse_core.py auto-triage-issues-enabled <repo> print true/false for one configured repo (issue-triage)
+  wheelhouse_core.py thank-on-merge-enabled <repo> print true/false for one configured repo
   wheelhouse_core.py state <field>        print one field of the state block in $ISSUE_BODY
   wheelhouse_core.py repos                list configured repos
 
@@ -209,6 +210,15 @@ def load_config():
         # Same idea, but for issue-triage cards. Independent of `auto_triage`:
         # either can be toggled off without affecting the other.
         "auto_triage_issues": bool(cfg.get("auto_triage_issues", True)),
+        # Contributor-etiquette DEFAULT ON: a successful merge posts a short,
+        # friendly @-mention thank-you on the contributor's PR. Set false (globally
+        # or per-repo) to restore silent merges.
+        "thank_on_merge": bool(cfg.get("thank_on_merge", True)),
+        # Optional custom wording (an `{author}` placeholder is substituted with
+        # the contributor's bare login; include `@{author}` in the template when
+        # you want a mention); empty/absent means "use the built-in default".
+        # A per-repo `thank_on_merge_message` override takes precedence.
+        "thank_on_merge_message": str(cfg.get("thank_on_merge_message") or "").strip(),
     }
 
 
@@ -666,6 +676,25 @@ def _auto_triage_issues_enabled(repo_cfg, global_default):
     """
     v = repo_cfg.get("auto_triage_issues")
     return global_default if v is None else bool(v)
+
+
+def _thank_on_merge_enabled(repo_cfg, global_default):
+    """Effective thank_on_merge for one repo, mirroring auto_approve_ci.
+
+    Default ON is the intended fresh-fork etiquette; the global or per-repo
+    false value opts out of the post-merge thank-you comment entirely."""
+    v = repo_cfg.get("thank_on_merge")
+    return global_default if v is None else bool(v)
+
+
+def _thank_on_merge_message(repo_cfg, global_message):
+    """Effective thank_on_merge_message for one repo: the per-repo override if
+    it is a non-blank string, else the global config message (which may itself
+    be blank - the caller falls back to the built-in default in that case)."""
+    v = repo_cfg.get("thank_on_merge_message")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return global_message
 
 
 def _author_login(author):
@@ -1904,6 +1933,17 @@ def cmd_auto_triage_issues_enabled(repo):
     )
 
 
+def cmd_thank_on_merge_enabled(repo):
+    cfg = load_config()
+    if repo not in cfg["repos"]:
+        sys.exit("unknown repo '%s'" % repo)
+    print(
+        "true"
+        if _thank_on_merge_enabled(cfg["repos"][repo], cfg["thank_on_merge"])
+        else "false"
+    )
+
+
 def cmd_state(field):
     """Print one field of the state block in $ISSUE_BODY (for the deep-review workflow)."""
     st = parse_state_block(os.environ.get("ISSUE_BODY", ""))
@@ -1928,6 +1968,8 @@ def main():
         cmd_auto_triage_enabled(sys.argv[2])
     elif cmd == "auto-triage-issues-enabled" and len(sys.argv) == 3:
         cmd_auto_triage_issues_enabled(sys.argv[2])
+    elif cmd == "thank-on-merge-enabled" and len(sys.argv) == 3:
+        cmd_thank_on_merge_enabled(sys.argv[2])
     elif cmd == "state" and len(sys.argv) == 3:
         cmd_state(sys.argv[2])
     elif cmd == "repos":

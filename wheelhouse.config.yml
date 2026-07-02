@@ -30,6 +30,8 @@ repos:
     # auto_approve_ci: false       # optional override of the global setting
     # auto_triage: false           # optional per-repo opt-out for Claude spend (pr-review)
     # auto_triage_issues: false    # optional per-repo opt-out for Claude spend (issue-triage)
+    # thank_on_merge: false        # optional per-repo opt-out for the merge thank-you comment
+    # thank_on_merge_message: "Cheers @{author}, this just merged!"  # optional per-repo wording override
 
   # All repos below share the same contribution gate: the `no-mistakes-required.yml`
   # workflow runs a job named "PR must be raised via no-mistakes" on every PR to
@@ -165,3 +167,21 @@ card_issues: true
 # fork PRs still run the safety-gated approve/noop path. You can also override
 # per repo with a `auto_approve_ci: false` key on any entry under `repos:` above.
 auto_approve_ci: true
+
+# Post a short, friendly thank-you comment on a fleet contributor's PR when a
+# decision card merges it (via the "Merge" checkbox or a natural-language
+# "merge it"). The comment @-mentions the contributor by login - this is the
+# one sanctioned contributor @-mention (owner decision cards never @-mention
+# the target's author). DEFAULT ON (this key is absent -> treated as true);
+# set false here, or per-repo with `thank_on_merge: false` above, to merge
+# silently instead. Owner, configured-maintainer, and bot authors are never
+# thanked/@-mentioned. This never affects merge success: a failure to post the
+# comment (or config being off) is swallowed and the merge still succeeds.
+thank_on_merge: true
+
+# Optional custom wording for the thank-you comment above. `{author}` is
+# substituted with the contributor's bare login; include `@{author}` when you
+# want a GitHub mention. Leave unset to use the built-in default ("Thanks
+# @{author} - merged! Really appreciate the contribution.").
+# A per-repo `thank_on_merge_message` (see `repos:` above) overrides this.
+# thank_on_merge_message: "Thanks @{author} - merged! Really appreciate the contribution."

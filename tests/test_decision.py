@@ -336,6 +336,188 @@ def test_load_llm_result_tolerant():
 
 
 # --------------------------------------------------------------------------- #
+# thank_on_merge: best-effort @-mention thank-you comment after a successful
+# merge (checkbox `merge` and NL "merge it" both back onto do_merge)
+# --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def patch_core(**attrs):
+    """Monkeypatch attributes on ad.core for the duration of the block, no
+    network required. Restores the originals afterwards even on failure."""
+    saved = {name: getattr(ad.core, name) for name in attrs}
+    for name, value in attrs.items():
+        setattr(ad.core, name, value)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(ad.core, name, value)
+
+
+def fake_gh_rest(pr, merge_error=None, comment_error=None, calls=None):
+    """A no-network stand-in for core.gh_rest covering the calls do_merge and
+    _thank_contributor make: GET the PR, PUT the merge, POST the comment."""
+    calls = calls if calls is not None else []
+
+    def fake(path, method=None, fields=None, jq=None, paginate=False, slurp=False):
+        calls.append({"path": path, "method": method, "fields": fields})
+        if method in (None, "GET"):
+            return pr
+        if method == "PUT":
+            if merge_error:
+                raise RuntimeError(merge_error)
+            return {}
+        if method == "POST":
+            if comment_error:
+                raise RuntimeError(comment_error)
+            return {}
+        return {}
+
+    return fake, calls
+
+
+THANK_CFG = {
+    "maintainer": "",
+    "nl_decisions": False,
+    "card_issues": False,
+    "auto_approve_ci": True,
+    "auto_triage": True,
+    "auto_triage_issues": True,
+}
+
+
+def thank_cfg(repo="target-repo", repo_cfg=None, **overrides):
+    cfg = dict(THANK_CFG)
+    cfg["thank_on_merge"] = True
+    cfg["thank_on_merge_message"] = ""
+    cfg.update(overrides)
+    cfg["repos"] = {repo: dict(repo_cfg or {})}
+    return cfg
+
+
+def open_pr(login="contributor", head_sha="abc123"):
+    return {"merged": False, "state": "open", "head": {"sha": head_sha},
+            "user": {"login": login}}
+
+
+def posts(calls):
+    return [c for c in calls if c["method"] == "POST"]
+
+
+def test_thank_on_merge_posts_after_successful_merge():
+    fake, calls = fake_gh_rest(open_pr())
+    with patch_core(gh_rest=fake, load_config=lambda: thank_cfg(),
+                     maintainers=lambda: {"owner-login"}):
+        message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check("thank: successful merge still resolves", terminal == "resolved")
+    p = posts(calls)
+    check("thank: exactly one thank-you comment posted", len(p) == 1)
+    check("thank: comment @-mentions the contributor",
+          p and "@contributor" in (p[0]["fields"] or {}).get("body", ""))
+    check("thank: comment posted on the target PR's own thread",
+          p and p[0]["path"] == "/repos/owner-login/target-repo/issues/5/comments")
+    check("thank: default wording has no product name or jargon",
+          p and "wheelhouse" not in (p[0]["fields"] or {}).get("body", "").lower())
+
+
+def test_thank_on_merge_disabled_globally():
+    fake, calls = fake_gh_rest(open_pr())
+    with patch_core(gh_rest=fake, load_config=lambda: thank_cfg(thank_on_merge=False),
+                     maintainers=lambda: {"owner-login"}):
+        _, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check("thank: merge still resolves when globally disabled", terminal == "resolved")
+    check("thank: no comment posted when globally disabled", posts(calls) == [])
+
+
+def test_thank_on_merge_disabled_per_repo():
+    fake, calls = fake_gh_rest(open_pr())
+    cfg = thank_cfg(repo_cfg={"thank_on_merge": False})
+    with patch_core(gh_rest=fake, load_config=lambda: cfg,
+                     maintainers=lambda: {"owner-login"}):
+        _, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check("thank: merge still resolves when per-repo disabled", terminal == "resolved")
+    check("thank: no comment posted when per-repo disabled", posts(calls) == [])
+
+
+def test_thank_on_merge_skips_non_success_outcomes():
+    common = dict(load_config=lambda: thank_cfg(), maintainers=lambda: {"owner-login"})
+
+    fake, calls = fake_gh_rest({"merged": True, "state": "closed",
+                                 "head": {"sha": "abc123"}, "user": {"login": "contributor"}})
+    with patch_core(gh_rest=fake, **common):
+        _, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check("thank: already-merged still resolves", terminal == "resolved")
+    check("thank: no comment on already-merged", posts(calls) == [])
+
+    fake, calls = fake_gh_rest({"merged": False, "state": "closed",
+                                 "head": {"sha": "abc123"}, "user": {"login": "contributor"}})
+    with patch_core(gh_rest=fake, **common):
+        _, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check("thank: not-open still resolves", terminal == "resolved")
+    check("thank: no comment on not-open", posts(calls) == [])
+
+    fake, calls = fake_gh_rest(open_pr(head_sha="newsha"))
+    with patch_core(gh_rest=fake, **common):
+        _, terminal = ad.do_merge("owner-login", "target-repo", 5, "oldsha")
+    check("thank: head-moved is blocked, not resolved", terminal == "blocked")
+    check("thank: no comment on head-moved", posts(calls) == [])
+
+    fake, calls = fake_gh_rest(open_pr(), merge_error="422: merge conflict")
+    with patch_core(gh_rest=fake, **common):
+        _, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check("thank: a failed merge PUT is an error, not resolved", terminal == "error")
+    check("thank: no comment when the merge itself failed", posts(calls) == [])
+
+
+def test_thank_on_merge_best_effort_survives_comment_failure():
+    fake, calls = fake_gh_rest(open_pr(), comment_error="502: bad gateway")
+    with patch_core(gh_rest=fake, load_config=lambda: thank_cfg(),
+                     maintainers=lambda: {"owner-login"}):
+        message, terminal = ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    check("thank: a comment-post failure never flips a successful merge",
+          terminal == "resolved" and "Merged" in message)
+
+
+def test_thank_on_merge_skips_owner_maintainer_bot_and_blank_author():
+    common = dict(load_config=lambda: thank_cfg(), maintainers=lambda: {"owner-login", "maint-login"})
+
+    for login, label in (
+        ("Owner-Login", "owner (case-insensitive)"),
+        ("maint-login", "configured maintainer"),
+        ("release-bot[bot]", "bot login suffix"),
+        ("", "blank author"),
+    ):
+        fake, calls = fake_gh_rest(open_pr(login=login))
+        with patch_core(gh_rest=fake, **common):
+            ad.do_merge("owner-login", "target-repo", 5, "abc123")
+        check("thank: no @-mention for %s" % label, posts(calls) == [])
+
+
+def test_thank_on_merge_custom_message_and_per_repo_precedence():
+    fake, calls = fake_gh_rest(open_pr(login="alice"))
+    cfg = thank_cfg(thank_on_merge_message="Cheers @{author}, appreciate it!")
+    with patch_core(gh_rest=fake, load_config=lambda: cfg,
+                     maintainers=lambda: {"owner-login"}):
+        ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    p = posts(calls)
+    check("thank: global custom message honored",
+          p and p[0]["fields"]["body"] == "Cheers @alice, appreciate it!")
+    check("thank: mention appears exactly once (no double @@)",
+          p and p[0]["fields"]["body"].count("@alice") == 1)
+
+    fake, calls = fake_gh_rest(open_pr(login="alice"))
+    cfg = thank_cfg(
+        repo_cfg={"thank_on_merge_message": "Repo says thanks @{author}!"},
+        thank_on_merge_message="Global says thanks @{author}!",
+    )
+    with patch_core(gh_rest=fake, load_config=lambda: cfg,
+                     maintainers=lambda: {"owner-login"}):
+        ad.do_merge("owner-login", "target-repo", 5, "abc123")
+    p = posts(calls)
+    check("thank: per-repo message overrides the global message",
+          p and p[0]["fields"]["body"] == "Repo says thanks @alice!")
+
+
+# --------------------------------------------------------------------------- #
 # conversation history: owner-scoped, chronological, triggering-comment-excluded
 # --------------------------------------------------------------------------- #
 BOT = ad.BOT_LOGIN          # the workflow bot - the assistant's prior turns
@@ -510,6 +692,13 @@ def main():
     test_answer_and_clarify_do_not_execute()
     test_trust_boundary()
     test_load_llm_result_tolerant()
+    test_thank_on_merge_posts_after_successful_merge()
+    test_thank_on_merge_disabled_globally()
+    test_thank_on_merge_disabled_per_repo()
+    test_thank_on_merge_skips_non_success_outcomes()
+    test_thank_on_merge_best_effort_survives_comment_failure()
+    test_thank_on_merge_skips_owner_maintainer_bot_and_blank_author()
+    test_thank_on_merge_custom_message_and_per_repo_precedence()
     test_history_owner_scoped_and_ordered()
     test_history_excludes_trigger_even_if_owner_authored()
     test_history_empty_and_blank_cases()

@@ -329,6 +329,63 @@ def _close_target(slug, number):
     )
 
 
+# Contributor-facing (posted on the TARGET repo's PR, not a card) - no product
+# name, no internal jargon; see AGENTS.md "Contributor-facing copy". `{author}`
+# is substituted with the trusted bare login from the fetched PR object; templates
+# include `@{author}` when they want a GitHub mention. Never use free-text or
+# untrusted target content here.
+DEFAULT_THANK_ON_MERGE_MESSAGE = (
+    "Thanks @{author} - merged! Really appreciate the contribution."
+)
+
+
+def _skip_thank_you(login):
+    """True when `login` should not get an @-mention thank-you: blank, a bot
+    (`*[bot]` login suffix), or an owner/maintainer (don't thank yourself)."""
+    if not login:
+        return True
+    if login.casefold().endswith("[bot]"):
+        return True
+    maintainer_logins = {m.casefold() for m in core.maintainers()}
+    return login.casefold() in maintainer_logins
+
+
+def _thank_you_message(repo, login):
+    """The rendered thank-you text for `login` on `repo`, or None when the
+    feature is disabled (globally or per-repo) for this repo."""
+    cfg = core.load_config()
+    repo_cfg = cfg["repos"].get(repo, {})
+    if not core._thank_on_merge_enabled(repo_cfg, cfg["thank_on_merge"]):
+        return None
+    template = core._thank_on_merge_message(repo_cfg, cfg["thank_on_merge_message"])
+    template = template or DEFAULT_THANK_ON_MERGE_MESSAGE
+    try:
+        return template.format(author=login)
+    except (KeyError, IndexError, ValueError):
+        return DEFAULT_THANK_ON_MERGE_MESSAGE.format(author=login)
+
+
+def _thank_contributor(owner, repo, number, pr):
+    """Best-effort post-merge thank-you comment. Never raises and never
+    changes the merge's own success result - any failure here (disabled
+    config, missing/excluded author, or the comment post itself failing) is
+    swallowed to a logged warning, since the merge has already succeeded by
+    the time this runs."""
+    try:
+        login = str(((pr or {}).get("user") or {}).get("login") or "").strip()
+        if _skip_thank_you(login):
+            return
+        message = _thank_you_message(repo, login)
+        if not message:
+            return
+        _comment_target("%s/%s" % (owner, repo), number, message)
+    except Exception as e:
+        print(
+            "::warning::wheelhouse thank-on-merge failed for %s#%s: %s"
+            % (repo, number, str(e)[:200])
+        )
+
+
 def do_merge(owner, repo, number, head_sha):
     slug = "%s/%s" % (owner, repo)
     pr = core.gh_rest("/repos/%s/pulls/%s" % (slug, number))
@@ -368,6 +425,7 @@ def do_merge(owner, repo, number, head_sha):
                 "error",
             )
         return ("Merge of %s#%s failed: %s" % (repo, number, detail), "error")
+    _thank_contributor(owner, repo, number, pr)
     return ("Merged %s#%s (%s)." % (repo, number, method), "resolved")
 
 
