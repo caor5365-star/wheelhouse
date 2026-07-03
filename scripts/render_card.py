@@ -981,20 +981,21 @@ def _create_card(card):
         os.unlink(body_path)
 
 
-def _refresh_card(number, card, existing, item, old_state):
+def _refresh_card(number, card, existing, item, old_state, preserve_triage=True):
     """Re-render an existing card's body in place and REPLACE its managed labels.
     If the target's head moved, drop a short comment so the owner sees a
     re-review is warranted rather than being silently swapped underneath."""
     to_add, to_remove = plan_label_update(card["labels"], existing.get("labels"))
     card = dict(card)
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
-    card["body"] = _preserve_same_revision_triage(
-        card["body"],
-        existing.get("body", ""),
-        item,
-        old_state,
-        owner=owner,
-    )
+    if preserve_triage:
+        card["body"] = _preserve_same_revision_triage(
+            card["body"],
+            existing.get("body", ""),
+            item,
+            old_state,
+            owner=owner,
+        )
     body_path = _write_body(card["body"])
     try:
         args = ["issue", "edit", str(number), "--body-file", body_path]
@@ -1091,7 +1092,14 @@ def upsert_card(item, existing=None, has_token=False):
     held = bool((old_state or {}).get("held")) and not publish_held
     card = render(item, held=held)
     ensure_labels(card["labels"])
-    return _refresh_card(number, card, existing, item, old_state)
+    return _refresh_card(
+        number,
+        card,
+        existing,
+        item,
+        old_state,
+        preserve_triage=not publish_held,
+    )
 
 
 def close_card(number, message, label="resolved"):

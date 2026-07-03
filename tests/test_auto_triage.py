@@ -2245,7 +2245,9 @@ def test_upsert_card_refresh_preserves_held_when_still_eligible():
         rc.get_card = lambda number: existing if int(number) == 7 else None
         rc.ensure_labels = lambda labels_: None
 
-        def fake_refresh(number, card, existing_, item_, old_state):
+        def fake_refresh(
+            number, card, existing_, item_, old_state, preserve_triage=True
+        ):
             captured["card"] = card
             return number
 
@@ -2269,8 +2271,13 @@ def test_upsert_card_refresh_preserves_held_when_still_eligible():
         )
 
 
-def _capture_upsert_refresh(base_item, changed_item, has_token):
+def _capture_upsert_refresh(base_item, changed_item, has_token, queued=False):
     held_card = rc.render(base_item, held=True)
+    if queued:
+        held_card["body"] = rc.body_with_triage_queued(held_card["body"], base_item)
+        state = core.parse_state_block(held_card["body"])
+        state["triage_error"] = "dispatch failed"
+        held_card["body"] = rc._replace_state_block(held_card["body"], state)
     existing = {
         "number": 7,
         "body": held_card["body"],
@@ -2303,8 +2310,15 @@ def _capture_upsert_refresh(base_item, changed_item, has_token):
     return calls
 
 
-def _run_reconcile_real_upsert_refresh(base_item, changed_item, token="true"):
+def _run_reconcile_real_upsert_refresh(
+    base_item, changed_item, token="true", queued=False
+):
     held = rc.render(base_item, held=True)
+    if queued:
+        held["body"] = rc.body_with_triage_queued(held["body"], base_item)
+        state = core.parse_state_block(held["body"])
+        state["triage_error"] = "dispatch failed"
+        held["body"] = rc._replace_state_block(held["body"], state)
     row = {
         "number": 7,
         "body": held["body"],
@@ -2412,7 +2426,9 @@ def test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off():
         ),
     ]
     for label, base_item, changed_item, has_token in scenarios:
-        calls = _capture_upsert_refresh(base_item, changed_item, has_token)
+        calls = _capture_upsert_refresh(
+            base_item, changed_item, has_token, queued=True
+        )
         body = calls.get("body", "")
         state = core.parse_state_block(body)
         edit = calls["gh_calls"][0] if calls["gh_calls"] else []
@@ -2430,6 +2446,28 @@ def test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off():
             "refresh publish(%s): pending label removed" % label,
             "--remove-label" in edit and rc.HOLD_LABEL in edit,
         )
+        check(
+            "refresh publish(%s): queued cache cleared" % label,
+            "triaged_sha" not in state
+            and "triage_status" not in state
+            and "triage_error" not in state,
+        )
+
+    restored = item(auto_triage=True, head_sha="oldsha")
+    calls = _capture_upsert_refresh(
+        restored,
+        item(auto_triage=False, head_sha="oldsha"),
+        has_token=True,
+        queued=True,
+    )
+    state = core.parse_state_block(calls.get("body", ""))
+    check(
+        "refresh publish: restored eligibility queues same revision",
+        rc.should_auto_triage(
+            restored, state, labels("needs-decision", "kind:pr-review"), True
+        )
+        is True,
+    )
 
 
 def test_reconcile_refresh_preserves_held_when_still_eligible():
@@ -2463,7 +2501,7 @@ def test_reconcile_refresh_publishes_held_when_hold_gate_turns_off():
         ),
     ]
     for label, old, new, token in scenarios:
-        calls = _run_reconcile_real_upsert_refresh(old, new, token=token)
+        calls = _run_reconcile_real_upsert_refresh(old, new, token=token, queued=True)
         body = calls["card"]["body"]
         state = core.parse_state_block(body)
         label_names = {label["name"] for label in calls["card"]["labels"]}
@@ -2482,6 +2520,12 @@ def test_reconcile_refresh_publishes_held_when_hold_gate_turns_off():
         check(
             "reconcile(%s): ineligible held card has no triage section" % label,
             rc.TRIAGE_START not in body,
+        )
+        check(
+            "reconcile(%s): ineligible held card clears queued cache" % label,
+            "triaged_sha" not in state
+            and "triage_status" not in state
+            and "triage_error" not in state,
         )
 
 
