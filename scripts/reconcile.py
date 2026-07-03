@@ -6,6 +6,9 @@ The safety net behind the event-driven `ingest` path. Given a fresh scan of the
 fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
 
   * opens a decision card for any worklist item that has no open card,
+    reads that freshly-created card back by the issue number returned from
+    `upsert_card`, and queues its first eligible auto-triage attempt in the same
+    pass,
   * refreshes an OPEN `needs-decision` card in place when its target's material
     state changed (head_sha/compliance/tests/kind/priority/options) - so the queue
     reflects current state, not just the snapshot taken when the card was first
@@ -137,10 +140,16 @@ def main():
         current_for_triage = None
         if ex is None:
             try:
-                render_card.upsert_card(item)
+                # Read the fresh card back BY NUMBER (current_card ->
+                # get_card), never via find_card's label-filtered listing:
+                # that listing is not read-after-write consistent right after
+                # `gh issue create`, so it would silently miss the card just
+                # created and skip queuing its first auto-triage attempt.
+                number = render_card.upsert_card(item)
                 created += 1
-                found = render_card.find_card(render_card.marker_label(item))
-                current_for_triage = current_card(found) if found else None
+                current_for_triage = (
+                    current_card({"number": number}) if number else None
+                )
             except Exception as e:  # one bad item must not abort the whole pass
                 print(
                     "::warning::failed to create card for %s#%s: %s"

@@ -11,12 +11,15 @@ card-side activity never re-triggers the handler).
 CLI:
   render_card.py upsert --item-file item.json    create-or-refresh a card (dedup by marker)
   render_card.py render --item-file item.json --out-dir DIR    debug: write title/body/labels
-  render_card.py queue-triage --item-file item.json    mark triage queued and dispatch triage.yml when eligible
+  render_card.py queue-triage --item-file item.json [--issue N]    mark triage queued and dispatch triage.yml when eligible
   render_card.py triage-apply --issue N --revision REV --execution-file FILE    update the card from Claude output
   render_card.py triage-fail --issue N --revision REV --message TEXT    write the auto-triage unavailable section
 
 REV is a PR's head SHA (pr-review) or an issue's `updatedAt` (issue-triage) -
 whichever revision the auto-triage cache is keyed on for that card's kind.
+When `upsert` runs under GitHub Actions it writes `issue=N` to `$GITHUB_OUTPUT`;
+pass that number to `queue-triage --issue N` so a newly-created card is read
+back by number instead of through the read-after-write-racy label listing.
 """
 
 import argparse
@@ -366,8 +369,7 @@ def triage_section(triage=None, error=None, owner="", repo=""):
     lines = [TRIAGE_START, "### Triage", ""]
     if triage:
         lines.append(
-            "- **Summary:** %s"
-            % qualify_issue_refs(triage["summary"], owner, repo)
+            "- **Summary:** %s" % qualify_issue_refs(triage["summary"], owner, repo)
         )
         lines.append(
             "- **Product implications:** %s"
@@ -633,7 +635,11 @@ def ensure_labels(labels):
 def find_card(marker):
     """Find the open card for this target. Returns {number, body, labels} (the
     full row, so the caller can diff state + labels without a second fetch), or
-    None if no open card exists."""
+    None if no open card exists.
+
+    Do not use this to read back a card just created in the same pass; the
+    underlying label-filtered issue listing is not read-after-write consistent.
+    Use the issue number returned by `upsert_card` with `get_card` instead."""
     r = _gh(
         [
             "issue",
@@ -730,6 +736,13 @@ def update_card_triage(number, revision, triage=None, error=None, owner=""):
 
 
 def _create_card(card):
+    """Create the card and return its issue number.
+
+    `gh issue create` returns the created issue's URL, and a label-filtered
+    `gh issue list` (see `find_card`) is not read-after-write consistent right
+    after creation - so callers that need the fresh card back MUST use this
+    number (e.g. via `get_card`), never `find_card`, to avoid a race where the
+    listing doesn't see the just-created issue yet."""
     body_path = _write_body(card["body"])
     try:
         args = ["issue", "create", "--title", card["title"], "--body-file", body_path]
@@ -738,7 +751,10 @@ def _create_card(card):
         r = _gh(args)
         url = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
         print("created card %s for %s" % (url or "?", card["marker"]))
-        return url
+        try:
+            return int(url.rsplit("/", 1)[-1])
+        except (ValueError, IndexError):
+            return None
     finally:
         os.unlink(body_path)
 
@@ -808,7 +824,11 @@ def upsert_card(item, existing=None):
         `target:`) are REPLACED so stale ones are removed, and a head-SHA change
         also drops a short "target updated" comment.
 
-    Returns the issue number (or the created card's URL for a brand-new card)."""
+    Always returns an int issue number (new or existing), or None if a
+    brand-new card's number could not be parsed from `gh issue create`'s
+    output. Callers needing the fresh card back MUST read it by this number
+    (e.g. `get_card`/`current_card`) - a label-filtered `find_card` listing is
+    not read-after-write consistent immediately after creation."""
     card = render(item)
     ensure_labels(card["labels"])
     known_number = (existing or {}).get("number")
@@ -959,12 +979,23 @@ def main():
 
     qt = sub.add_parser("queue-triage")
     qt.add_argument("--item-file", required=True)
+    qt.add_argument(
+        "--issue",
+        default="",
+        help="Known card issue number (e.g. from `upsert`'s output). When "
+        "given, read the card by number instead of the read-after-write-"
+        "racy find_card label listing.",
+    )
 
     args = ap.parse_args()
 
     if args.cmd == "upsert":
         item = load_item(args.item_file)
-        upsert_card(item)
+        number = upsert_card(item)
+        gh_output = os.environ.get("GITHUB_OUTPUT")
+        if gh_output and number:
+            with open(gh_output, "a") as f:
+                f.write("issue=%s\n" % number)
     elif args.cmd == "render":
         item = load_item(args.item_file)
         card = render(item)
@@ -983,7 +1014,9 @@ def main():
         result_text = extract_claude_result(args.execution_file)
         triage = parse_triage_json(result_text)
         if triage:
-            if update_card_triage(args.issue, args.revision, triage=triage, owner=owner):
+            if update_card_triage(
+                args.issue, args.revision, triage=triage, owner=owner
+            ):
                 print("updated auto triage on card #%s" % args.issue)
             else:
                 print("auto triage result skipped for card #%s" % args.issue)
@@ -999,11 +1032,26 @@ def main():
     elif args.cmd == "queue-triage":
         try:
             item = load_item(args.item_file)
-            card = find_card(marker_label(item))
-            if not card:
-                print("auto triage skipped: no open card for %s" % marker_label(item))
-                return
-            current = get_card(card["number"])
+            number = None
+            if args.issue:
+                try:
+                    number = int(args.issue)
+                except ValueError:
+                    number = None
+            if number:
+                # Known number (e.g. threaded from `upsert`'s output): read the
+                # card back by number, which is read-after-write consistent
+                # immediately after creation - unlike the label-filtered
+                # find_card listing below.
+                current = get_card(number)
+            else:
+                card = find_card(marker_label(item))
+                if not card:
+                    print(
+                        "auto triage skipped: no open card for %s" % marker_label(item)
+                    )
+                    return
+                current = get_card(card["number"])
             if not current or not issue_is_open(current):
                 print("auto triage skipped: card no longer open")
                 return

@@ -234,6 +234,20 @@ still appears where it's plain English, e.g. "triage the queue".)
   `triage_status=queued`; this intentionally spends at most one Claude attempt
   per revision even if the asynchronous workflow errors, times out, or cannot
   parse a result.
+  **A just-created card must be read back BY NUMBER, never via
+  `find_card`'s label-filtered `gh issue list`.** That listing is not
+  read-after-write consistent immediately after `gh issue create`, so reading
+  it back milliseconds later can silently miss the card and skip queuing its
+  first auto-triage attempt (only a later scan's pre-existing-card backfill
+  path would then catch it). `_create_card`/`upsert_card` therefore always
+  return an int issue number (never a URL), and `reconcile.py`'s new-card
+  branch reads the fresh card via `current_card({"number": n})` -> `get_card`,
+  which IS consistent. The ingest fast path mirrors this: the `upsert` CLI
+  writes the created/refreshed number to `$GITHUB_OUTPUT` (`issue=N`), and
+  `ingest.yml`'s "Queue auto triage" step passes it as `queue-triage --issue
+  N`, so that path also reads by number; `queue-triage` keeps the `find_card`
+  lookup only as a fallback when no number is supplied (back-compat for a
+  manual invocation).
   `triaged_sha`, `updated_at`, and the visible `### Triage` section are
   non-material: they must never affect `classify`, `material_changed`,
   decision parsing, merge execution, fork-CI approval, author filtering, or
@@ -587,7 +601,7 @@ Run the unit tests:
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, plus open-issue/PR/closing-reference pagination guards, no network.
-- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline.
+- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline.
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.

@@ -134,6 +134,7 @@ Three independent Claude-powered features share one token (`CLAUDE_CODE_OAUTH_TO
 
 - **Auto triage (default-on, opt-out)** - when a PR-review card is created or refreshed to a new head, Claude does a quick read-only pass and writes Summary, Product implications, and Recommended next step into the card.
   It is cached by PR head SHA, so an unchanged hourly scan does not re-run it.
+  Newly created eligible cards are queued for that first triage attempt in the same scan or ingest run that creates them.
   Existing pure pending PR-review cards that predate the feature backfill once on the next scan.
   Set `auto_triage: false` globally or per repo when you want to control token spend.
   Issue-triage cards get the same treatment under the INDEPENDENT `auto_triage_issues` flag (also default-on): since issues have no head SHA, it caches by the issue's `updatedAt` instead, checks out the repo's default branch read-only for a little code context, and is opt-out the same way with `auto_triage_issues: false`.
@@ -232,6 +233,7 @@ The current render-version sweep also repairs older cached `Triage` sections by 
 A head move also leaves a "target updated" comment so you know to re-review the card.
 For PR-review cards, that new head also makes automatic triage stale; the next eligible scan or dispatch queues exactly one fresh triage attempt for that head.
 Issue-triage cards work the same way except the revision is the issue's `updatedAt`, not a head SHA: a new comment or edit alone is not a material change (so it does not trigger a full card refresh), but it does make the card eligible for exactly one fresh triage attempt.
+An eligible card created by scan-backstop or ingest is also queued in that same run, so it does not wait for a later backfill scan.
 Pure pending PR-review and issue-triage cards that were already open before auto triage existed have no `triaged_sha` cache yet, so they backfill once on the next eligible scan.
 If you act before that refresh lands, a `/merge` (or a "merge it" comment) still refuses a stale head with a note.
 The scheduled backstop also self-heals: if the underlying PR/issue gets merged or closed elsewhere, its card is closed automatically on the next successful complete scan.
@@ -339,6 +341,7 @@ Each CI-approval candidate the auto path handles also writes exactly one scan-lo
 - **A PR-review or issue-triage card has no Triage section.**
   For PR-review, auto triage is skipped when `auto_triage: false`, `CLAUDE_CODE_OAUTH_TOKEN` is absent, the card is not a pure `needs-decision` PR-review card, or the card already carries `triaged_sha` for the current head.
   For issue-triage, it's skipped the same way but under the INDEPENDENT `auto_triage_issues`, and the cache is the issue's `updatedAt` revision instead of a head SHA.
+  A newly created eligible card should queue in the same **scan-backstop** or **ingest** run that created it.
   Check the latest **scan-backstop**, **ingest**, and **triage** workflow logs.
   If the triage workflow failed after queuing, the card may show a subtle unavailable note or simply keep the hidden cache so the same revision is not retried every hour.
 - **A plain-English reply did nothing / I only get slash-commands.**
@@ -381,7 +384,7 @@ tests/test_reconcile.py        offline unit test for reconcile routing and self-
 tests/test_merge_conflict.py   offline unit test for mergeability routing, rebase nudges, and stale-card self-healing
 tests/test_ci_autoapprove.py   offline unit test for CI safety, scan-time auto-approval, and logging
 tests/test_author_filter.py    offline unit test for queue author filtering and skipped-card CI handling
-tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, dispatch, ref qualification, and workflow isolation
+tests/test_auto_triage.py      offline unit test for automatic triage config, cache, rendering, same-pass new-card dispatch, ref qualification, and workflow isolation
 tests/test_deep_review.py      offline unit test for the always-on deep-review + Investigate wiring and trusted verdict posting
 tests/test_workflow_lint.py    offline regression guard for workflow `gh api --slurp` / `--jq` misuse
 tests/test_qualify_refs.py     offline unit test for shared bare `#N` -> `<owner>/<repo>#N` qualification
