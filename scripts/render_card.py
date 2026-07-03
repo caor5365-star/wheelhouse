@@ -828,6 +828,28 @@ def mark_triage_queued(number, item, body):
     return True
 
 
+def _body_without_queued_triage(body, revision):
+    state = parse_state_block(body)
+    if not state or not triage_queued_for_head(state, revision):
+        return body
+    new_state = dict(state)
+    for key in ("triaged_sha", "triage_status", "triage_error"):
+        new_state.pop(key, None)
+    return _replace_state_block(remove_triage_section(body), new_state)
+
+
+def clear_triage_queued(number, revision):
+    card = get_card(number)
+    if not card or not issue_is_open(card) or not is_refreshable(card.get("labels")):
+        return False
+    body = card.get("body", "")
+    new_body = _body_without_queued_triage(body, revision)
+    if new_body == body:
+        return False
+    _edit_issue_body(number, new_body)
+    return True
+
+
 def dispatch_triage_workflow(number, item):
     kind = item.get("kind", "pr-review")
     args = [
@@ -848,6 +870,33 @@ def dispatch_triage_workflow(number, item):
     else:
         args += ["-f", "head_sha=%s" % (item.get("head_sha") or "")]
     _gh(args)
+
+
+def publish_dispatch_failure(number, revision, message, owner=""):
+    try:
+        if update_card_triage(number, revision, error=message, owner=owner):
+            return True
+    except Exception as e:
+        try:
+            if clear_triage_queued(number, revision):
+                raise RuntimeError(
+                    "failed to publish dispatch-failure note; "
+                    "cleared queued triage cache for retry: %s" % e
+                ) from e
+        except Exception as clear_error:
+            if isinstance(clear_error, RuntimeError):
+                raise
+            raise RuntimeError(
+                "failed to publish dispatch-failure note and failed to clear "
+                "queued triage cache: %s; clear failed: %s" % (e, clear_error)
+            ) from clear_error
+        raise
+    if clear_triage_queued(number, revision):
+        raise RuntimeError(
+            "dispatch-failure note was not applied; cleared queued triage cache "
+            "for retry"
+        )
+    return False
 
 
 def update_card_triage(number, revision, triage=None, error=None, owner=""):
@@ -1155,6 +1204,11 @@ def main():
     tr.add_argument("--issue", required=True)
     tr.add_argument("--kind", required=True)
     tr.add_argument("--revision", required=True)
+    tr.add_argument(
+        "--message",
+        default="Auto triage did not finish (the workflow run did not reach "
+        "its update step).",
+    )
 
     qt = sub.add_parser("queue-triage")
     qt.add_argument("--item-file", required=True)
@@ -1244,8 +1298,7 @@ def main():
                 update_card_triage(
                     args.issue,
                     args.revision,
-                    error="Auto triage did not finish (the workflow run did "
-                    "not reach its update step).",
+                    error=args.message,
                     owner=owner,
                 )
     elif args.cmd == "queue-triage":
@@ -1303,15 +1356,12 @@ def main():
                 % (current["number"], item.get("repo"), item.get("number"), str(e)[:160])
             )
             owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
-            try:
-                update_card_triage(
-                    current["number"],
-                    triage_revision(item),
-                    error="Auto triage could not be started: %s" % str(e)[:160],
-                    owner=owner,
-                )
-            except Exception:
-                pass
+            publish_dispatch_failure(
+                current["number"],
+                triage_revision(item),
+                "Auto triage could not be started: %s" % str(e)[:160],
+                owner=owner,
+            )
             return
         print("queued auto triage for card #%s" % current["number"])
 

@@ -869,6 +869,185 @@ def test_queue_triage_command_warns_on_dispatch_failure():
     )
 
 
+def test_queue_triage_command_clears_cache_when_publish_fails():
+    it = item(auto_triage=True)
+    current = card_row(it)
+
+    def fake_find(marker):
+        return {
+            "number": current["number"],
+            "body": current["body"],
+            "labels": current["labels"],
+        }
+
+    def fake_get(number):
+        return current
+
+    def fake_mark(number, queued_item, body):
+        current["body"] = rc.body_with_triage_queued(body, queued_item)
+        return True
+
+    def fake_dispatch(number, queued_item):
+        raise RuntimeError("workflow dispatch unavailable")
+
+    def fake_update(number, revision, triage=None, error=None, owner=""):
+        raise RuntimeError("card edit unavailable")
+
+    written = {}
+
+    def fake_write_body(body):
+        path = "/tmp/wheelhouse-test-dispatch-clear-body"
+        written[path] = body
+        return path
+
+    def fake_gh(args, check=True):
+        if args[:2] == ["issue", "edit"]:
+            path = args[args.index("--body-file") + 1]
+            current["body"] = written[path]
+        return None
+
+    old = (
+        sys.argv[:],
+        rc.find_card,
+        rc.get_card,
+        rc.mark_triage_queued,
+        rc.dispatch_triage_workflow,
+        rc.update_card_triage,
+        rc._write_body,
+        rc._gh,
+        rc.os.unlink,
+    )
+    rc.find_card = fake_find
+    rc.get_card = fake_get
+    rc.mark_triage_queued = fake_mark
+    rc.dispatch_triage_workflow = fake_dispatch
+    rc.update_card_triage = fake_update
+    rc._write_body = fake_write_body
+    rc._gh = fake_gh
+    rc.os.unlink = lambda path: None
+    d = tempfile.mkdtemp()
+    raised = ""
+    try:
+        item_path = os.path.join(d, "item.json")
+        with open(item_path, "w") as f:
+            json.dump(it, f)
+        sys.argv = ["render_card.py", "queue-triage", "--item-file", item_path]
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                rc.main()
+        except RuntimeError as e:
+            raised = str(e)
+        out = buf.getvalue()
+    finally:
+        (
+            sys.argv,
+            rc.find_card,
+            rc.get_card,
+            rc.mark_triage_queued,
+            rc.dispatch_triage_workflow,
+            rc.update_card_triage,
+            rc._write_body,
+            rc._gh,
+            rc.os.unlink,
+        ) = old
+        shutil.rmtree(d, ignore_errors=True)
+
+    state = core.parse_state_block(current["body"])
+    check(
+        "queue cli: publish failure is surfaced",
+        "cleared queued triage cache for retry" in raised,
+    )
+    check(
+        "queue cli: dispatch failure warning is still printed",
+        "::warning::failed to dispatch auto triage" in out,
+    )
+    check("queue cli: queued status is cleared for retry", "triage_status" not in state)
+    check("queue cli: queued revision is cleared for retry", "triaged_sha" not in state)
+
+
+def test_reconcile_dispatch_failure_publish_failure_clears_cache():
+    it = item(auto_triage=True)
+    row = card_row(it)
+    row["state"] = core.parse_state_block(row["body"])
+
+    def fake_mark(number, queued_item, body):
+        row["body"] = rc.body_with_triage_queued(body, queued_item)
+        return True
+
+    def fake_dispatch(number, queued_item):
+        raise RuntimeError("workflow dispatch unavailable")
+
+    def fake_update(number, revision, triage=None, error=None, owner=""):
+        raise RuntimeError("card edit unavailable")
+
+    def fake_get(number):
+        current = dict(row)
+        current["state"] = "OPEN"
+        return current
+
+    written = {}
+
+    def fake_write_body(body):
+        path = "/tmp/wheelhouse-test-reconcile-clear-body"
+        written[path] = body
+        return path
+
+    def fake_gh(args, check=True):
+        if args[:2] == ["issue", "edit"]:
+            path = args[args.index("--body-file") + 1]
+            row["body"] = written[path]
+        return None
+
+    old = (
+        reconcile.render_card.mark_triage_queued,
+        reconcile.render_card.dispatch_triage_workflow,
+        reconcile.render_card.update_card_triage,
+        reconcile.render_card.get_card,
+        reconcile.render_card._write_body,
+        reconcile.render_card._gh,
+        reconcile.render_card.os.unlink,
+    )
+    reconcile.render_card.mark_triage_queued = fake_mark
+    reconcile.render_card.dispatch_triage_workflow = fake_dispatch
+    reconcile.render_card.update_card_triage = fake_update
+    reconcile.render_card.get_card = fake_get
+    reconcile.render_card._write_body = fake_write_body
+    reconcile.render_card._gh = fake_gh
+    reconcile.render_card.os.unlink = lambda path: None
+    raised = ""
+    try:
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                reconcile.maybe_queue_auto_triage(it, row, True, owner="acme")
+        except RuntimeError as e:
+            raised = str(e)
+        out = buf.getvalue()
+    finally:
+        (
+            reconcile.render_card.mark_triage_queued,
+            reconcile.render_card.dispatch_triage_workflow,
+            reconcile.render_card.update_card_triage,
+            reconcile.render_card.get_card,
+            reconcile.render_card._write_body,
+            reconcile.render_card._gh,
+            reconcile.render_card.os.unlink,
+        ) = old
+
+    state = core.parse_state_block(row["body"])
+    check(
+        "reconcile: publish failure is surfaced",
+        "cleared queued triage cache for retry" in raised,
+    )
+    check(
+        "reconcile: dispatch failure warning is still printed",
+        "::warning::failed to dispatch auto triage" in out,
+    )
+    check("reconcile: queued status is cleared for retry", "triage_status" not in state)
+    check("reconcile: queued revision is cleared for retry", "triaged_sha" not in state)
+
+
 def test_reconcile_queues_after_head_refresh():
     old = item(head_sha="oldsha", auto_triage=True)
     old_card = card_row(old)
@@ -1596,8 +1775,8 @@ def test_triage_workflow_security_wiring():
     check("workflow: held-card recovery step exists", recover is not None)
     if recover:
         check(
-            "workflow: recovery step always runs when triage was enabled",
-            recover.get("if") == "always() && steps.gate.outputs.enabled == 'true'",
+            "workflow: recovery step does not depend on Claude token gate",
+            recover.get("if") == "always() && steps.trusted-src.outputs.path != ''",
         )
         env = recover.get("env", {})
         check(
@@ -1607,6 +1786,10 @@ def test_triage_workflow_security_wiring():
             and env.get("HEAD_SHA") == "${{ github.event.inputs.head_sha }}"
             and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}",
         )
+        check(
+            "workflow: recovery step can detect token-gate skips",
+            env.get("TRIAGE_GATE_ENABLED") == "${{ steps.gate.outputs.enabled }}",
+        )
         check("workflow: recovery step is hardened like the update step", hardened_shell_env(recover))
         run = str(recover.get("run", ""))
         check(
@@ -1614,7 +1797,12 @@ def test_triage_workflow_security_wiring():
             "scripts/render_card.py triage-recover" in run
             and "--issue \"$ISSUE\"" in run
             and "--kind \"$KIND\"" in run
-            and "--revision \"$REVISION\"" in run,
+            and "--revision \"$REVISION\"" in run
+            and "--message \"$RECOVER_MESSAGE\"" in run,
+        )
+        check(
+            "workflow: recovery step publishes token-unavailable failures",
+            "CLAUDE_CODE_OAUTH_TOKEN is absent" in run,
         )
         check(
             "workflow: recovery step runs under the default token (no FLEET_TOKEN)",
@@ -1658,6 +1846,8 @@ def test_triage_recover_cli_publishes_a_stuck_held_card():
                 kind,
                 "--revision",
                 revision,
+                "--message",
+                "Auto triage could not run because CLAUDE_CODE_OAUTH_TOKEN is absent.",
             ]
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -1674,6 +1864,10 @@ def test_triage_recover_cli_publishes_a_stuck_held_card():
         check(
             "recover(%s): checkboxes now present" % kind,
             "<!-- opt:close -->" in calls["body"],
+        )
+        check(
+            "recover(%s): custom failure message is attached" % kind,
+            "CLAUDE_CODE_OAUTH_TOKEN is absent" in calls["body"],
         )
         check(
             "recover(%s): hold label removed via gh edit" % kind,
@@ -2274,6 +2468,8 @@ def main():
     test_reconcile_new_card_triage_is_idempotent_on_next_pass()
     test_queue_triage_cli_uses_known_issue_number_without_find_card()
     test_queue_triage_command_warns_on_dispatch_failure()
+    test_queue_triage_command_clears_cache_when_publish_fails()
+    test_reconcile_dispatch_failure_publish_failure_clears_cache()
     test_reconcile_queues_after_head_refresh()
     test_reconcile_queues_after_issue_updated_at_advance()
     test_auto_triage_toggles_are_independent_end_to_end()

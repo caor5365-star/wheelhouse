@@ -107,15 +107,12 @@ def maybe_queue_auto_triage(item, row, has_token, owner=""):
             "- publishing the card so it is not left held indefinitely"
             % (row.get("number"), item.get("repo"), item.get("number"), str(e)[:160])
         )
-        try:
-            render_card.update_card_triage(
-                row["number"],
-                revision,
-                error="Auto triage could not be started: %s" % str(e)[:160],
-                owner=owner,
-            )
-        except Exception:
-            pass
+        render_card.publish_dispatch_failure(
+            row["number"],
+            revision,
+            "Auto triage could not be started: %s" % str(e)[:160],
+            owner=owner,
+        )
         return False
     print(
         "queued auto triage for %s#%s on card #%s"

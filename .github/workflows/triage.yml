@@ -518,7 +518,7 @@ jobs:
       # is a no-op unless the card is genuinely still held and queued for
       # exactly this revision.
       - name: Recover a held card if this run never reached the update step
-        if: always() && steps.gate.outputs.enabled == 'true'
+        if: always() && steps.trusted-src.outputs.path != ''
         working-directory: ${{ steps.trusted-src.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -526,6 +526,7 @@ jobs:
           KIND: ${{ github.event.inputs.kind }}
           HEAD_SHA: ${{ github.event.inputs.head_sha }}
           REVISION_INPUT: ${{ github.event.inputs.revision }}
+          TRIAGE_GATE_ENABLED: ${{ steps.gate.outputs.enabled }}
           TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
           TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
           TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
@@ -551,6 +552,10 @@ jobs:
           else
             REVISION="$HEAD_SHA"
           fi
+          RECOVER_MESSAGE="Auto triage did not finish (the workflow run did not reach its update step)."
+          if [ "${TRIAGE_GATE_ENABLED:-}" = "false" ]; then
+            RECOVER_MESSAGE="Auto triage could not run because CLAUDE_CODE_OAUTH_TOKEN is absent."
+          fi
           export REVISION
           env -i \
             PATH="$TRUSTED_PATH" \
@@ -564,4 +569,5 @@ jobs:
             "$TRUSTED_PYTHON" scripts/render_card.py triage-recover \
               --issue "$ISSUE" \
               --kind "$KIND" \
-              --revision "$REVISION"
+              --revision "$REVISION" \
+              --message "$RECOVER_MESSAGE"
