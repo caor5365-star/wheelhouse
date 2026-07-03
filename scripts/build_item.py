@@ -22,7 +22,9 @@ and a false payload value can only opt that item out; it never affects
 `auto_triage` or vice versa. `updated_at` is the issue-triage auto-triage cache
 key (issues have no head SHA); omit it and this item is simply never eligible
 for automatic issue triage (fail-open, mirroring a pr-review item with no
-`head_sha`).
+`head_sha`). The same eligibility gates decide whether render_card.py creates a
+brand-new card as a held `pending-triage` placeholder before that first
+auto-triage attempt.
 """
 import json
 import os

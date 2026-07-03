@@ -204,6 +204,61 @@ def test_investigate_allow_set_and_nl_exclusion():
               for k in ("pr-review", "issue-triage", "ci-approval")))
 
 
+# A HELD pr-review card (render_card.py "Held cards"): its placeholder body
+# has no checkbox lines, but `held` in the state block is the authoritative,
+# defense-in-depth signal cmd_parse/cmd_nl_eligible check directly.
+HELD_CARD = ('<!-- wheelhouse-state: {"repo":"lavish-axi","number":42,'
+             '"kind":"pr-review","head_sha":"abc",'
+             '"options":["merge","close","investigate","hold"],"held":true} -->')
+
+
+def test_held_card_is_inert_to_decision_handler():
+    # A checkbox tick (e.g. a hand-crafted body edit, since the real
+    # placeholder body has no `<!-- opt:* -->` markers to tick) is ignored.
+    out = run_parse({
+        "EVENT_NAME": "issues", "EVENT_ACTION": "edited", "ISSUE_BODY": HELD_CARD,
+        "CHECKBOXES_OLD": parser_json(), "CHECKBOXES_NEW": parser_json("merge"),
+    })
+    check("held: checkbox tick produces no decision", out.get("decision", "") == "")
+    check("held: checkbox tick produces no investigate", out.get("investigate", "") == "")
+
+    # A slash-command reply is ignored too.
+    out2 = run_parse({
+        "EVENT_NAME": "issue_comment", "ISSUE_BODY": HELD_CARD,
+        "COMMENT_BODY": "/merge",
+    })
+    check("held: slash-command produces no decision", out2.get("decision", "") == "")
+
+    # nl-eligible: a plain-English comment on a held card is never routed to
+    # the LLM (avoids both a wasted call and a hallucinated action).
+    saved = {k: os.environ.get(k) for k in ("ISSUE_BODY", "COMMENT_BODY")}
+    try:
+        os.environ["ISSUE_BODY"] = HELD_CARD
+        os.environ["COMMENT_BODY"] = "merge it please"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ad.cmd_nl_eligible()
+        check("held: nl-eligible is false", buf.getvalue().strip() == "false")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # Sanity: the identical card, once published (held removed and real
+    # checkboxes present), IS actionable - the guard is specific to `held`.
+    published = HELD_CARD.replace(',"held":true', "")
+    out3 = run_parse({
+        "EVENT_NAME": "issues", "EVENT_ACTION": "edited", "ISSUE_BODY": published,
+        "CHECKBOXES_OLD": parser_json(), "CHECKBOXES_NEW": parser_json("merge"),
+    })
+    check(
+        "held: once published the same card IS actionable",
+        out3.get("decision") == "merge",
+    )
+
+
 def test_nl_never_offers_or_accepts_investigate():
     body = '<!-- wheelhouse-state: {"repo":"r","number":1,"kind":"pr-review"} -->'
     prompt = ad.build_nl_prompt(body, "take a closer look at this", "(target)", "pr-review")
@@ -713,6 +768,7 @@ def main():
     test_investigate_is_non_consuming()
     test_consuming_actions_unchanged_by_investigate_routing()
     test_investigate_allow_set_and_nl_exclusion()
+    test_held_card_is_inert_to_decision_handler()
     test_nl_never_offers_or_accepts_investigate()
     test_clear_checkbox()
     test_clear_checkbox_reads_body_file()

@@ -10,6 +10,8 @@ Phases, run as separate workflow steps so each uses the right token:
                tick is read from issue-ops/parser output (the `{selected,
                unselected}` JSON for the card's new and old body) - this script
                only diffs the parsed option keys, it no longer scrapes the body.
+               A held `pending-triage` card is intentionally inert until
+               render_card.py publishes its first auto-triage result.
                The NON-CONSUMING `investigate` tick is routed apart from every
                other action: it sets `investigate` (not `decision`) so the
                handler triggers deep-review.yml and leaves the card OPEN.
@@ -27,7 +29,8 @@ Phases, run as separate workflow steps so each uses the right token:
 Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
 
   nl-eligible  Print true/false: is this an owner comment that should be routed
-               to the LLM intent-mapper? (a decision card AND not a slash-command).
+               to the LLM intent-mapper? (a decision card AND not held AND not
+               a slash-command).
 
   nl-prompt    Build the LLM prompt: the deterministic card context + the
                owner's comment (trusted instructions) plus the target content as
@@ -256,6 +259,14 @@ def cmd_parse():
     state = core.parse_state_block(body)
     if not state:
         set_output("decision", "")  # not a decision card
+        return
+    if state.get("held"):
+        # HELD card (see render_card.py "Held cards"): its placeholder body
+        # has no checkboxes to tick, but this is defense in depth against a
+        # slash-command or a hand-crafted checkbox line reaching a card that
+        # has not yet published its first auto-triage result. Inert until
+        # `update_card_triage` publishes it.
+        set_output("decision", "")
         return
     kind = state.get("kind", "pr-review")
     allowed = ALLOWED.get(kind, set())
@@ -515,12 +526,15 @@ def is_slash_comment(comment):
 def cmd_nl_eligible():
     """Print true/false: should this owner comment be routed to the LLM?
 
-    Eligible iff the issue is a decision card AND the comment is free-form text
-    (not a slash-command). The owner-gate, the nl_decisions flag and the token
-    presence are checked by the workflow; this only classifies the comment."""
+    Eligible iff the issue is a decision card, it is not still HELD pending
+    its first auto-triage attempt (render_card.py "Held cards"), AND the
+    comment is free-form text (not a slash-command). The owner-gate, the
+    nl_decisions flag and the token presence are checked by the workflow;
+    this only classifies the comment."""
     body = os.environ.get("ISSUE_BODY", "")
     comment = os.environ.get("COMMENT_BODY", "")
-    is_card = core.parse_state_block(body) is not None
+    state = core.parse_state_block(body)
+    is_card = state is not None and not state.get("held")
     eligible = is_card and bool(comment.strip()) and not is_slash_comment(comment)
     print("true" if eligible else "false")
 

@@ -81,6 +81,8 @@ maintainer: ""
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision pr-review
 # card gets one quick advisory triage per PR head SHA.
 # The card gains a Summary, Product implications, and Recommended next step.
+# A brand-new eligible card is first labeled pending-triage and shows no
+# decision checkboxes until that attempt completes or fails open.
 # This never acts and never changes routing; it only gives owner-facing context.
 # Set false to opt out for token-spend control, or override per repo above.
 # Governs pr-review cards ONLY - see `auto_triage_issues` below for issue-triage.
@@ -91,6 +93,8 @@ auto_triage: true
 # When CLAUDE_CODE_OAUTH_TOKEN is present, each pure needs-decision issue-triage
 # card gets one quick advisory triage per issue `updatedAt` revision (issues have
 # no head SHA, so a new comment or edit is what makes it eligible again).
+# A brand-new eligible issue card is first labeled pending-triage and shows no
+# decision checkboxes until that attempt completes or fails open.
 # It checks out the repo's default branch read-only for a little code context;
 # there is no diff to review. Same Summary / Product implications / Recommended
 # next step shape as PR auto triage; same advisory-only, never-acts guarantee.

@@ -3,10 +3,17 @@
 Wheelhouse - decision-card renderer + card operations.
 
 `render(item)` turns one classified item into a decision card: a human-readable
-body with quick-decision checkboxes and a hidden machine-readable state block.
+body with quick-decision checkboxes (or a held auto-triage placeholder) and a
+hidden machine-readable state block.
 `upsert_card`/`close_card` create/refresh/consume cards in THIS repo (via the
 ambient GH_TOKEN, which the workflow sets to the default GITHUB_TOKEN so that
 card-side activity never re-triggers the handler).
+
+When auto triage is enabled (`should_hold`), a brand-new pr-review/issue-
+triage card is created HELD - `pending-triage` on top of `needs-decision`, a
+placeholder body with no checkboxes - and published to its normal actionable
+form by `update_card_triage` the moment its first auto-triage attempt
+completes, success or failure alike. See "Held cards" above `HOLD_LABEL`.
 
 CLI:
   render_card.py upsert --item-file item.json    create-or-refresh a card (dedup by marker)
@@ -14,6 +21,7 @@ CLI:
   render_card.py queue-triage --item-file item.json [--issue N]    mark triage queued and dispatch triage.yml when eligible
   render_card.py triage-apply --issue N --revision REV --execution-file FILE    update the card from Claude output
   render_card.py triage-fail --issue N --revision REV --message TEXT    write the auto-triage unavailable section
+  render_card.py triage-recover --issue N --kind KIND --revision REV    fail-open safety net: publish a held card still stuck "queued" for REV
 
 REV is a PR's head SHA (pr-review) or an issue's `updatedAt` (issue-triage) -
 whichever revision the auto-triage cache is keyed on for that card's kind.
@@ -79,11 +87,56 @@ KIND_LABEL = {
 MANAGED_LABEL_PREFIXES = ("repo:", "kind:", "priority:", "target:")
 
 # A card carrying any of these is past the pure pending state: the owner has a
-# decision in flight (`processing`), the card is consumed (`resolved`), or it is
-# held (`blocked`). Re-rendering the body resets its checkboxes, which would
-# clobber an in-progress decision or race the decision-handler - so a refresh
-# SKIPS a card with any of these. Only a pure `needs-decision` card is refreshed.
+# decision in flight (`processing`), the card is consumed (`resolved`), or the
+# owner parked it (`blocked`, via the `/hold` decision). Re-rendering the body
+# resets its checkboxes, which would clobber an in-progress decision or race
+# the decision-handler - so a refresh SKIPS a card with any of these. Only a
+# pure `needs-decision` card is refreshed.
 NON_REFRESHABLE_LABELS = frozenset({"processing", "resolved", "blocked"})
+
+# A held card (see "Held cards" below) ALSO carries `needs-decision` and is
+# therefore refreshable/triage-eligible like any other pure pending card -
+# `HOLD_LABEL` is deliberately absent from `NON_REFRESHABLE_LABELS` because
+# triage.yml's resolve step requires `needs-decision` to still be a pure,
+# refreshable card in order to run at all (see `should_hold`/`update_card_triage`).
+#
+# --------------------------------------------------------------------------- #
+# Held cards (visibility gated on the first auto-triage attempt completing)
+# --------------------------------------------------------------------------- #
+# When a brand-new pr-review/issue-triage card is eligible for auto triage
+# (`should_hold`), it is created HELD: `needs-decision` stays (triage.yml needs
+# it), `HOLD_LABEL` is added on top, and the body's "Your decision" section is
+# a placeholder with no checkboxes (`_held_decision_lines` - no `<!-- opt:* -->`
+# markers, so it is inert to the decision handler; see `cmd_parse`/
+# `cmd_nl_eligible` in apply_decision.py, which also short-circuit on the
+# state block's `held` flag as defense in depth). This is a deliberately
+# DIFFERENT concept from the `/hold` decision action (which parks a card under
+# the `blocked` label) - do not conflate the two.
+#
+# A held card is published - checkboxes appear, `HOLD_LABEL` is removed - the
+# moment its own auto-triage ATTEMPT completes, via `update_card_triage`
+# (called by both `triage-apply` on success and `triage-fail` on error/
+# timeout - fail-open by construction, never gated on triage succeeding).
+# Publishing is keyed to the card's own current revision
+# (`state_revision`/`triage_revision`): if the card was refreshed to a newer
+# revision while the attempt was in flight, that stale attempt's completion is
+# a no-op (the fresh revision's own queued attempt - `should_auto_triage`
+# always requeues on a revision change - will publish the card when it
+# completes instead), exactly mirroring how a stale triage result is already
+# dropped for a published card.
+#
+# `held` is carried as a non-material key in the state block (like
+# `triaged_sha`/`triage_status`): it is never in `MATERIAL_FIELDS` and never
+# affects classify/material_changed/decision-parsing/merge-close-approve/
+# fork-CI-safety/author-filtering/conflict-routing. `HOLD_LABEL` is a display/
+# filtering label kept in sync with it (added by `card_labels` whenever
+# `render()` is called with `held=True`), never read back as the source of
+# truth - `state["held"]` is. A refresh preserves held-ness only while the
+# refreshed item still qualifies for auto triage; otherwise it renders the card
+# actionable in the same refresh. `update_card_triage` publishes held cards when
+# an auto-triage attempt completes.
+HOLD_LABEL = "pending-triage"
+SYNCED_EXACT_LABELS = frozenset({HOLD_LABEL})
 
 # The fields whose change makes a card materially stale and worth re-rendering.
 # Title / summary / recommendation re-render naturally; they are NOT triggers.
@@ -131,14 +184,17 @@ def marker_label(item):
     return "target:%s-%s" % (item["repo"], item["number"])
 
 
-def card_labels(item):
-    return [
+def card_labels(item, held=False):
+    labels = [
         "needs-decision",
         "repo:%s" % item["repo"],
         "kind:%s" % item["kind"],
         "priority:%s" % item.get("priority", "low"),
         marker_label(item),
     ]
+    if held:
+        labels.append(HOLD_LABEL)
+    return labels
 
 
 def card_options(item):
@@ -211,6 +267,18 @@ def render_stale(state):
     return stored_version < CARD_RENDER_VERSION
 
 
+def held_publish_needed(item, state, has_token):
+    return bool((state or {}).get("held")) and not should_hold(item, has_token)
+
+
+def refresh_needed(item, state, has_token=False):
+    return (
+        material_changed(item, state)
+        or render_stale(state)
+        or held_publish_needed(item, state, has_token)
+    )
+
+
 # Auto-triage caches against a per-kind revision: a PR's `head_sha`, or an
 # issue's `updatedAt` (issues have no head SHA, and `updatedAt` advances on any
 # edit or new comment). For PRs, `head_sha` is also a material refresh field; for
@@ -223,7 +291,7 @@ AUTO_TRIAGE_FLAG_BY_KIND = {
 }
 
 
-def _triage_revision(item):
+def triage_revision(item):
     """The freshness key auto-triage caches against for this item's kind."""
     if item.get("kind") == "issue-triage":
         return item.get("updated_at", "") or ""
@@ -232,7 +300,7 @@ def _triage_revision(item):
 
 def state_revision(state, kind):
     """The card's stored freshness key for `kind` (the counterpart of
-    `_triage_revision` read back off a parsed state block)."""
+    `triage_revision` read back off a parsed state block)."""
     if kind == "issue-triage":
         return (state or {}).get("updated_at", "") or ""
     return (state or {}).get("head_sha", "") or ""
@@ -268,7 +336,7 @@ def triage_fresh(item, state):
     written before the workflow dispatch so a failed or timed-out workflow does
     not get re-run every hourly scan for the same revision.
     """
-    revision = _triage_revision(item)
+    revision = triage_revision(item)
     return bool(revision and (state or {}).get("triaged_sha") == revision)
 
 
@@ -280,11 +348,16 @@ def triage_queued_for_head(state, revision):
     )
 
 
-def should_auto_triage(item, state, labels, has_token=True):
-    """Whether this card should queue the lightweight automatic triage.
+def should_hold(item, has_token):
+    """Whether a BRAND-NEW card for this item should be created HELD - a
+    placeholder body with no decision checkboxes, pending its first auto-
+    triage attempt (see "Held cards" above).
 
-    pr-review cards are gated by `auto_triage`; issue-triage cards are gated
-    by the INDEPENDENT `auto_triage_issues`. No other kind ever auto-triages."""
+    Gated on exactly the same enablement this item would need to have triage
+    queued at all: the per-kind flag (`auto_triage`/`auto_triage_issues`) plus
+    token presence, and a resolvable revision to cache against. A brand-new
+    card has no state/labels yet, so this omits the `is_refreshable`/
+    freshness checks `should_auto_triage` does for an EXISTING card."""
     if not has_token:
         return False
     kind = item.get("kind", "pr-review")
@@ -293,14 +366,32 @@ def should_auto_triage(item, state, labels, has_token=True):
         return False
     if item.get(flag, True) is False:
         return False
+    return bool(triage_revision(item))
+
+
+def should_auto_triage(item, state, labels, has_token=True):
+    """Whether this card should queue the lightweight automatic triage.
+
+    pr-review cards are gated by `auto_triage`; issue-triage cards are gated
+    by the INDEPENDENT `auto_triage_issues`. No other kind ever auto-triages."""
+    if not should_hold(item, has_token):
+        return False
     if not is_refreshable(labels):
         return False
-    revision = _triage_revision(item)
-    if not revision:
-        return False
+    kind = item.get("kind", "pr-review")
+    revision = triage_revision(item)
     if kind == "issue-triage" and _issue_revision_is_older(revision, state):
         return False
     return not triage_fresh(item, state)
+
+
+def auto_triage_has_token():
+    """Whether `CLAUDE_CODE_OAUTH_TOKEN` is configured, per the workflow-set
+    `WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN` env var (secrets aren't readable from a
+    script directly). Shared by `reconcile.py` and the `upsert`/`queue-triage`
+    CLI commands so held-card gating and triage-queueing gating read the same
+    signal."""
+    return os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN", "").lower() == "true"
 
 
 def _label_names(labels):
@@ -313,20 +404,21 @@ def _label_names(labels):
 
 
 def is_refreshable(labels):
-    """A card is refreshable only in the pure `needs-decision` state."""
+    """A card is refreshable only while it has `needs-decision` and no
+    in-flight or terminal label. `pending-triage` is allowed because held cards
+    must still refresh, auto-triage, and self-heal."""
     names = _label_names(labels)
     return "needs-decision" in names and names.isdisjoint(NON_REFRESHABLE_LABELS)
 
 
 def plan_label_update(desired, current):
-    """Plan a true label replace of the wheelhouse-managed namespaces. Returns
-    (to_add, to_remove): managed labels that no longer apply are removed;
-    `needs-decision` and any non-managed (human-added) label are never removed."""
+    """Plan a true label replace of Wheelhouse-owned labels."""
     current_names = _label_names(current)
     desired_set = set(desired)
     managed_now = {n for n in current_names if n.startswith(MANAGED_LABEL_PREFIXES)}
+    synced_now = current_names.intersection(SYNCED_EXACT_LABELS)
     to_add = [label for label in desired if label not in current_names]
-    to_remove = sorted(managed_now - desired_set)
+    to_remove = sorted((managed_now | synced_now) - desired_set)
     return to_add, to_remove
 
 
@@ -437,7 +529,7 @@ def _preserve_same_revision_triage(body, existing_body, item, old_state, owner="
         return body
     if (old_state or {}).get("kind") != kind:
         return body
-    revision = _triage_revision(item)
+    revision = triage_revision(item)
     if not revision or state_revision(old_state, kind) != revision:
         return body
 
@@ -472,7 +564,7 @@ def _state_with_triage(state, revision, status, error=None):
 def body_with_triage_queued(body, item):
     state = parse_state_block(body)
     kind = item.get("kind", "pr-review")
-    revision = _triage_revision(item)
+    revision = triage_revision(item)
     if not state or kind not in AUTO_TRIAGE_FLAG_BY_KIND or state.get("kind") != kind:
         return body
     if not revision:
@@ -509,8 +601,65 @@ def body_with_triage_result(body, revision, triage=None, error=None, owner=""):
     return _replace_state_block(updated, new_state)
 
 
-def render(item):
-    """item -> {title, body, labels, marker}. Tolerates missing optional fields."""
+DECISION_START = "<!-- wheelhouse-decision:start -->"
+DECISION_END = "<!-- wheelhouse-decision:end -->"
+_DECISION_SECTION_RE = re.compile(
+    r"<!--\s*wheelhouse-decision:start\s*-->.*?<!--\s*wheelhouse-decision:end\s*-->",
+    re.S,
+)
+
+
+def _decision_lines(kind, options):
+    lines = [
+        "### Your decision",
+        "",
+        "Tick **one** box for a quick call, or reply with a slash-command "
+        "(%s):" % SLASH_HINT.get(kind, "`/close`, `/hold`"),
+        "",
+    ]
+    for key in options:
+        label = OPTION_LABELS.get(key, key)
+        lines.append("- [ ] %s <!-- opt:%s -->" % (label, key))
+    lines.append("")
+    lines.append(
+        "<sub>Only the repository owner can drive this decision - everyone "
+        "else's edits and comments are ignored.</sub>"
+    )
+    return lines
+
+
+def _held_decision_lines():
+    """The placeholder "Your decision" content for a held card: no checkboxes
+    (no `<!-- opt:* -->` markers), so it is inert to the decision handler."""
+    return [
+        "### Your decision",
+        "",
+        "_Automatic triage is still running for this card. A decision to "
+        "make will appear here once it finishes - triage succeeding or "
+        "failing both unlock this card, so this is never a permanent wait._",
+    ]
+
+
+def _decision_section(kind, options, held):
+    inner = _held_decision_lines() if held else _decision_lines(kind, options)
+    return "\n".join([DECISION_START] + inner + [DECISION_END])
+
+
+def _publish_decision_section(body, kind, options):
+    """Replace a held card's placeholder "Your decision" block with the real
+    checkboxes, in place. A no-op (returns `body` unchanged) if the markers
+    are missing, e.g. a pre-feature card that was never held."""
+    section = _decision_section(kind, options, held=False)
+    new_body, count = _DECISION_SECTION_RE.subn(section.replace("\\", "\\\\"), body or "", count=1)
+    return new_body if count else body
+
+
+def render(item, held=False):
+    """item -> {title, body, labels, marker}. Tolerates missing optional fields.
+
+    `held=True` renders the placeholder "Held cards" form (see the module-
+    level comment above `HOLD_LABEL`): the state block carries `held: true`
+    and the "Your decision" section has no checkboxes."""
     kind = item.get("kind", "pr-review")
     repo = item["repo"]
     number = int(item["number"])
@@ -536,8 +685,10 @@ def render(item):
     }
     state.update({k: v for k, v in material_signature(item).items() if k != "options"})
     state["render_version"] = CARD_RENDER_VERSION
+    if held:
+        state["held"] = True
     if triage:
-        state["triaged_sha"] = item.get("triaged_sha") or _triage_revision(item)
+        state["triaged_sha"] = item.get("triaged_sha") or triage_revision(item)
         state["triage_status"] = "succeeded"
 
     short = title if len(title) <= 70 else title[:67] + "..."
@@ -577,20 +728,7 @@ def render(item):
     lines.append("### Recommended action")
     lines.append(item.get("recommendation", "Needs your call."))
     lines.append("")
-    lines.append("### Your decision")
-    lines.append(
-        "Tick **one** box for a quick call, or reply with a slash-command "
-        "(%s):" % SLASH_HINT.get(kind, "`/close`, `/hold`")
-    )
-    lines.append("")
-    for key in options:
-        label = OPTION_LABELS.get(key, key)
-        lines.append("- [ ] %s <!-- opt:%s -->" % (label, key))
-    lines.append("")
-    lines.append(
-        "<sub>Only the repository owner can drive this decision - everyone "
-        "else's edits and comments are ignored.</sub>"
-    )
+    lines.append(_decision_section(kind, options, held))
     lines.append("")
     lines.append(
         "<!-- wheelhouse-state: %s -->" % json.dumps(state, separators=(",", ":"))
@@ -600,7 +738,7 @@ def render(item):
     return {
         "title": issue_title,
         "body": body,
-        "labels": card_labels(item),
+        "labels": card_labels(item, held),
         "marker": marker_label(item),
     }
 
@@ -621,6 +759,8 @@ def ensure_labels(labels):
         color = "ededed"
         if label == "needs-decision":
             color = "1d76db"
+        elif label == HOLD_LABEL:
+            color = "bfdadc"
         elif label.startswith("priority:high"):
             color = "d93f0b"
         elif label.startswith("priority:"):
@@ -678,10 +818,13 @@ def _write_body(body):
         return f.name
 
 
-def _edit_issue_body(number, body):
+def _edit_issue_body(number, body, remove_labels=None):
     body_path = _write_body(body)
     try:
-        _gh(["issue", "edit", str(number), "--body-file", body_path])
+        args = ["issue", "edit", str(number), "--body-file", body_path]
+        for label in remove_labels or []:
+            args += ["--remove-label", label]
+        _gh(args)
     finally:
         os.unlink(body_path)
 
@@ -693,6 +836,28 @@ def mark_triage_queued(number, item, body):
     the asynchronous workflow fails before it can write a visible result.
     """
     new_body = body_with_triage_queued(body, item)
+    if new_body == body:
+        return False
+    _edit_issue_body(number, new_body)
+    return True
+
+
+def _body_without_queued_triage(body, revision):
+    state = parse_state_block(body)
+    if not state or not triage_queued_for_head(state, revision):
+        return body
+    new_state = dict(state)
+    for key in ("triaged_sha", "triage_status", "triage_error"):
+        new_state.pop(key, None)
+    return _replace_state_block(remove_triage_section(body), new_state)
+
+
+def clear_triage_queued(number, revision):
+    card = get_card(number)
+    if not card or not issue_is_open(card) or not is_refreshable(card.get("labels")):
+        return False
+    body = card.get("body", "")
+    new_body = _body_without_queued_triage(body, revision)
     if new_body == body:
         return False
     _edit_issue_body(number, new_body)
@@ -721,17 +886,76 @@ def dispatch_triage_workflow(number, item):
     _gh(args)
 
 
+def publish_dispatch_failure(number, revision, message, owner=""):
+    try:
+        if update_card_triage(number, revision, error=message, owner=owner):
+            return True
+    except Exception as e:
+        try:
+            if clear_triage_queued(number, revision):
+                raise RuntimeError(
+                    "failed to publish dispatch-failure note; "
+                    "cleared queued triage cache for retry: %s" % e
+                ) from e
+        except Exception as clear_error:
+            if isinstance(clear_error, RuntimeError):
+                raise
+            raise RuntimeError(
+                "failed to publish dispatch-failure note and failed to clear "
+                "queued triage cache: %s; clear failed: %s" % (e, clear_error)
+            ) from clear_error
+        raise
+    if clear_triage_queued(number, revision):
+        raise RuntimeError(
+            "dispatch-failure note was not applied; cleared queued triage cache "
+            "for retry"
+        )
+    return False
+
+
 def update_card_triage(number, revision, triage=None, error=None, owner=""):
+    """Attach a completed auto-triage attempt's result to its card.
+
+    If the card is still HELD, this ALSO publishes it in the same edit: the
+    placeholder "Your decision" section is replaced with the real checkboxes
+    and `HOLD_LABEL` is removed - the card becomes actionable. This runs
+    identically whether `triage` succeeded or `error` is set (a `triage-fail`
+    call): publishing is gated on the ATTEMPT completing, never on it
+    succeeding, so a held card can never stay hidden because triage errored
+    or timed out (see "Held cards" above).
+
+    Publishing only happens when this attempt's revision still matches the
+    card's own current revision. A mismatch means the card was refreshed to a
+    newer revision while this attempt was in flight; that refresh either kept a
+    held placeholder for the newer revision and queued a fresh attempt, or
+    published the card because auto triage was no longer eligible. This stale
+    attempt is therefore a no-op rather than publishing outdated content."""
     card = get_card(number)
     if not card or not issue_is_open(card) or not is_refreshable(card.get("labels")):
         return False
     body = card.get("body", "")
+    state = parse_state_block(body)
+    if not state:
+        return False
+    kind = state.get("kind")
+    held = bool(state.get("held"))
+    remove_labels = []
+    if held:
+        if state_revision(state, kind) != revision:
+            return False
+        options = state.get("options") or CHECKBOX_OPTIONS.get(kind, ["close", "hold"])
+        body = _publish_decision_section(body, kind, options)
+        state = dict(state)
+        state.pop("held", None)
+        body = _replace_state_block(body, state)
+        remove_labels.append(HOLD_LABEL)
+
     new_body = body_with_triage_result(
         body, revision, triage=triage, error=error, owner=owner
     )
-    if new_body == body:
+    if new_body == body and not held:
         return False
-    _edit_issue_body(number, new_body)
+    _edit_issue_body(number, new_body, remove_labels=remove_labels)
     return True
 
 
@@ -759,20 +983,21 @@ def _create_card(card):
         os.unlink(body_path)
 
 
-def _refresh_card(number, card, existing, item, old_state):
+def _refresh_card(number, card, existing, item, old_state, preserve_triage=True):
     """Re-render an existing card's body in place and REPLACE its managed labels.
     If the target's head moved, drop a short comment so the owner sees a
     re-review is warranted rather than being silently swapped underneath."""
     to_add, to_remove = plan_label_update(card["labels"], existing.get("labels"))
     card = dict(card)
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
-    card["body"] = _preserve_same_revision_triage(
-        card["body"],
-        existing.get("body", ""),
-        item,
-        old_state,
-        owner=owner,
-    )
+    if preserve_triage:
+        card["body"] = _preserve_same_revision_triage(
+            card["body"],
+            existing.get("body", ""),
+            item,
+            old_state,
+            owner=owner,
+        )
     body_path = _write_body(card["body"])
     try:
         args = ["issue", "edit", str(number), "--body-file", body_path]
@@ -808,55 +1033,76 @@ def _refresh_card(number, card, existing, item, old_state):
     return number
 
 
-def upsert_card(item, existing=None):
+def upsert_card(item, existing=None, has_token=False):
     """Create a new card, or refresh the existing one for this target in place.
+
+    `has_token` gates whether a BRAND-NEW eligible card is created HELD (see
+    "Held cards" above / `should_hold`) - pass the same
+    `CLAUDE_CODE_OAUTH_TOKEN`-presence signal used to gate whether auto triage
+    is queued at all (`auto_triage_has_token()`). On refresh, a currently-held
+    card stays held only if the refreshed item still passes `should_hold`.
 
     Refresh rules (see AGENTS.md "Card refresh"):
       * Only a pure `needs-decision` card is refreshed; a card already
         `processing`/`resolved`/`blocked` is left untouched (never rewrite a
         decision in flight - re-rendering the body would reset its checkboxes).
-      * A refresh runs when a MATERIAL field changed OR the card's stored
+      * A refresh runs when a MATERIAL field changed, the card's stored
         `render_version` is behind `CARD_RENDER_VERSION` (a one-time, self-
         terminating re-render for display-only fixes and card-body repairs like
-        cached triage ref qualification); a card that is neither is a full
-        no-op (no body edit, no label churn, no comment).
+        cached triage ref qualification), or a held card must be published
+        because auto triage is no longer eligible; a card with none of those
+        triggers is a full no-op (no body edit, no label churn, no comment).
       * On refresh the wheelhouse-managed labels (`repo:`/`kind:`/`priority:`/
         `target:`) are REPLACED so stale ones are removed, and a head-SHA change
-        also drops a short "target updated" comment.
+        also drops a short "target updated" comment. A held card whose refreshed
+        item no longer qualifies for auto triage is rendered actionable in that
+        same refresh.
 
     Always returns an int issue number (new or existing), or None if a
     brand-new card's number could not be parsed from `gh issue create`'s
     output. Callers needing the fresh card back MUST read it by this number
     (e.g. `get_card`/`current_card`) - a label-filtered `find_card` listing is
     not read-after-write consistent immediately after creation."""
-    card = render(item)
-    ensure_labels(card["labels"])
+    marker = marker_label(item)
     known_number = (existing or {}).get("number")
     if known_number:
         existing = get_card(known_number)
         if not existing or not issue_is_open(existing):
             print(
-                "skip card #%s for %s: card no longer open"
-                % (known_number, card["marker"])
+                "skip card #%s for %s: card no longer open" % (known_number, marker)
             )
             return known_number
     else:
-        existing = find_card(card["marker"])
+        existing = find_card(marker)
+
     if not existing:
+        card = render(item, held=should_hold(item, has_token))
+        ensure_labels(card["labels"])
         return _create_card(card)
 
     number = existing["number"]
     if not is_refreshable(existing.get("labels")):
         print(
             "skip card #%s for %s: decision in flight (not pure needs-decision)"
-            % (number, card["marker"])
+            % (number, marker)
         )
         return number
     old_state = parse_state_block(existing.get("body", ""))
-    if not material_changed(item, old_state) and not render_stale(old_state):
-        print("skip card #%s for %s: no material change" % (number, card["marker"]))
+    publish_held = held_publish_needed(item, old_state, has_token)
+    if not refresh_needed(item, old_state, has_token):
+        print("skip card #%s for %s: no material change" % (number, marker))
         return number
-    return _refresh_card(number, card, existing, item, old_state)
+    held = bool((old_state or {}).get("held")) and not publish_held
+    card = render(item, held=held)
+    ensure_labels(card["labels"])
+    return _refresh_card(
+        number,
+        card,
+        existing,
+        item,
+        old_state,
+        preserve_triage=not publish_held,
+    )
 
 
 def close_card(number, message, label="resolved"):
@@ -977,6 +1223,16 @@ def main():
     tf.add_argument("--revision", required=True)
     tf.add_argument("--message", default=TRIAGE_UNAVAILABLE)
 
+    tr = sub.add_parser("triage-recover")
+    tr.add_argument("--issue", required=True)
+    tr.add_argument("--kind", required=True)
+    tr.add_argument("--revision", required=True)
+    tr.add_argument(
+        "--message",
+        default="Auto triage did not finish (the workflow run did not reach "
+        "its update step).",
+    )
+
     qt = sub.add_parser("queue-triage")
     qt.add_argument("--item-file", required=True)
     qt.add_argument(
@@ -991,7 +1247,7 @@ def main():
 
     if args.cmd == "upsert":
         item = load_item(args.item_file)
-        number = upsert_card(item)
+        number = upsert_card(item, has_token=auto_triage_has_token())
         gh_output = os.environ.get("GITHUB_OUTPUT")
         if gh_output and number:
             with open(gh_output, "a") as f:
@@ -1029,6 +1285,45 @@ def main():
         owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
         print("::warning::auto triage failed: %s" % _clean_triage_text(args.message))
         update_card_triage(args.issue, args.revision, error=args.message, owner=owner)
+    elif args.cmd == "triage-recover":
+        # Last-resort fail-open safety net, run `always()` at the end of
+        # triage.yml using the RAW workflow_dispatch inputs (never a `resolve`
+        # step output, which may be empty if `resolve` itself failed before
+        # writing outputs - e.g. a transient `gh issue view` error). Ground-
+        # truths against the CURRENT card state rather than trusting any
+        # earlier step's outcome: a no-op unless the card is STILL held and
+        # STILL "queued" for exactly this revision, which only happens if
+        # nothing upstream (triage-apply/triage-fail) ever ran for it. See
+        # "Held cards" above - without this, a `resolve`-step failure would
+        # leave a held card hidden forever, since its `triaged_sha` cache
+        # already blocks every future scan from requeuing that revision.
+        owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+        card = get_card(args.issue)
+        if not card or not issue_is_open(card):
+            print("recover: card no longer open, nothing to recover")
+        else:
+            state = parse_state_block(card.get("body", ""))
+            if not state or not state.get("held"):
+                print("recover: card already published (or not a decision card)")
+            elif (
+                state_revision(state, args.kind) != args.revision
+                or state.get("triage_status") != "queued"
+            ):
+                print(
+                    "recover: card is not stuck on this exact queued attempt "
+                    "(a newer attempt already superseded or published it)"
+                )
+            else:
+                print(
+                    "::warning::auto triage run did not reach its update step "
+                    "for card #%s - recovering by publishing it" % args.issue
+                )
+                update_card_triage(
+                    args.issue,
+                    args.revision,
+                    error=args.message,
+                    owner=owner,
+                )
     elif args.cmd == "queue-triage":
         try:
             item = load_item(args.item_file)
@@ -1061,15 +1356,37 @@ def main():
             ):
                 print("auto triage skipped for card #%s" % current["number"])
                 return
-            if mark_triage_queued(current["number"], item, current.get("body", "")):
-                dispatch_triage_workflow(current["number"], item)
-                print("queued auto triage for card #%s" % current["number"])
+            if not mark_triage_queued(current["number"], item, current.get("body", "")):
+                return
         except Exception as e:
             item = locals().get("item") or {}
             print(
                 "::warning::failed to queue auto triage for %s#%s: %s"
                 % (item.get("repo", "?"), item.get("number", "?"), str(e)[:160])
             )
+            return
+        try:
+            dispatch_triage_workflow(current["number"], item)
+        except Exception as e:
+            # The queued-cache write above already landed, so a later scan
+            # would never retry this revision. If the card is HELD, publish
+            # it now with a note rather than leaving it held indefinitely -
+            # fail-open (see "Held cards" above) must not depend on a
+            # dispatch that never actually started.
+            print(
+                "::warning::failed to dispatch auto triage for card #%s (%s#%s): %s "
+                "- publishing the card so it is not left held indefinitely"
+                % (current["number"], item.get("repo"), item.get("number"), str(e)[:160])
+            )
+            owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+            publish_dispatch_failure(
+                current["number"],
+                triage_revision(item),
+                "Auto triage could not be started: %s" % str(e)[:160],
+                owner=owner,
+            )
+            return
+        print("queued auto triage for card #%s" % current["number"])
 
 
 if __name__ == "__main__":

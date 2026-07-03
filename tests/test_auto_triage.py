@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Offline checks for automatic lightweight PR-card triage.
+Offline checks for automatic lightweight PR-card and issue-card triage,
+including held-card publish and recovery behavior.
 
 Run: python tests/test_auto_triage.py
 """
@@ -8,6 +9,8 @@ Run: python tests/test_auto_triage.py
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -159,8 +162,16 @@ def run_reconcile(scan, cards, current_cards=None, token="true"):
         for c in (cards if current_cards is None else current_cards)
     }
 
-    def fake_upsert(it, existing=None):
-        calls["upsert"].append({"item": it, "existing": existing})
+    def fake_upsert(it, existing=None, has_token=False):
+        # `has_token` is recorded (for tests that assert on it) but not used
+        # to change the fake's rendering: this fake predates held cards and
+        # every other test in this module relies on its always-unheld output,
+        # so held-card behavior is exercised separately below via the real
+        # `render_card.upsert_card`/`update_card_triage`, not through this
+        # `reconcile.main()` fake.
+        calls["upsert"].append(
+            {"item": it, "existing": existing, "has_token": has_token}
+        )
         number = (existing or {}).get("number", 7)
         refreshed = card_row(it, number=number)
         current_by_number[number] = refreshed
@@ -763,6 +774,10 @@ def test_queue_triage_cli_uses_known_issue_number_without_find_card():
 
 
 def test_queue_triage_command_warns_on_dispatch_failure():
+    """A dispatch failure must not leave the queued-cache mark stuck forever
+    with no visible trace: the CLI now fails the card open immediately (via
+    `update_card_triage`, same as a HELD card's fail-open publish) instead of
+    only logging a warning - see AGENTS.md "Held cards"."""
     it = item(auto_triage=True)
     current = card_row(it)
 
@@ -783,27 +798,52 @@ def test_queue_triage_command_warns_on_dispatch_failure():
     def fake_dispatch(number, queued_item):
         raise RuntimeError("workflow dispatch unavailable")
 
+    # `update_card_triage`'s fail-open publish writes via `_write_body` (a
+    # real temp file) then `_gh(["issue", "edit", ..., "--body-file", path])`
+    # - capture the body written to that path instead of shelling out for real.
+    written = {}
+
+    def fake_write_body(body):
+        path = "/tmp/wheelhouse-test-dispatch-failure-body"
+        written[path] = body
+        return path
+
+    def fake_gh(args, check=True):
+        if args[:2] == ["issue", "edit"]:
+            path = args[args.index("--body-file") + 1]
+            current["body"] = written[path]
+        return None
+
     old = (
         sys.argv[:],
         rc.find_card,
         rc.get_card,
         rc.mark_triage_queued,
         rc.dispatch_triage_workflow,
+        rc._write_body,
+        rc._gh,
+        rc.os.unlink,
     )
     rc.find_card = fake_find
     rc.get_card = fake_get
     rc.mark_triage_queued = fake_mark
     rc.dispatch_triage_workflow = fake_dispatch
+    rc._write_body = fake_write_body
+    rc._gh = fake_gh
+    rc.os.unlink = lambda path: None
+    # `rc.os` IS the `os` module (not a copy), so patching `rc.os.unlink`
+    # patches `os.unlink` process-wide - it must be restored BEFORE
+    # `TemporaryDirectory` tears itself down, or that teardown breaks.
+    d = tempfile.mkdtemp()
     try:
-        with tempfile.TemporaryDirectory() as d:
-            item_path = os.path.join(d, "item.json")
-            with open(item_path, "w") as f:
-                json.dump(it, f)
-            sys.argv = ["render_card.py", "queue-triage", "--item-file", item_path]
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                rc.main()
-            out = buf.getvalue()
+        item_path = os.path.join(d, "item.json")
+        with open(item_path, "w") as f:
+            json.dump(it, f)
+        sys.argv = ["render_card.py", "queue-triage", "--item-file", item_path]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc.main()
+        out = buf.getvalue()
     finally:
         (
             sys.argv,
@@ -811,15 +851,203 @@ def test_queue_triage_command_warns_on_dispatch_failure():
             rc.get_card,
             rc.mark_triage_queued,
             rc.dispatch_triage_workflow,
+            rc._write_body,
+            rc._gh,
+            rc.os.unlink,
         ) = old
+        shutil.rmtree(d, ignore_errors=True)
 
     check(
         "queue cli: dispatch failure warns",
-        "::warning::failed to queue auto triage" in out,
+        "::warning::failed to dispatch auto triage" in out,
     )
     check(
-        "queue cli: queued cache was still written", "triage_status" in current["body"]
+        "queue cli: dispatch failure publishes the card with a note",
+        "Auto triage could not be started" in current["body"],
     )
+    check(
+        "queue cli: dispatch failure marks the attempt as errored, not queued",
+        core.parse_state_block(current["body"]).get("triage_status") == "error",
+    )
+
+
+def test_queue_triage_command_clears_cache_when_publish_fails():
+    it = item(auto_triage=True)
+    current = card_row(it)
+
+    def fake_find(marker):
+        return {
+            "number": current["number"],
+            "body": current["body"],
+            "labels": current["labels"],
+        }
+
+    def fake_get(number):
+        return current
+
+    def fake_mark(number, queued_item, body):
+        current["body"] = rc.body_with_triage_queued(body, queued_item)
+        return True
+
+    def fake_dispatch(number, queued_item):
+        raise RuntimeError("workflow dispatch unavailable")
+
+    def fake_update(number, revision, triage=None, error=None, owner=""):
+        raise RuntimeError("card edit unavailable")
+
+    written = {}
+
+    def fake_write_body(body):
+        path = "/tmp/wheelhouse-test-dispatch-clear-body"
+        written[path] = body
+        return path
+
+    def fake_gh(args, check=True):
+        if args[:2] == ["issue", "edit"]:
+            path = args[args.index("--body-file") + 1]
+            current["body"] = written[path]
+        return None
+
+    old = (
+        sys.argv[:],
+        rc.find_card,
+        rc.get_card,
+        rc.mark_triage_queued,
+        rc.dispatch_triage_workflow,
+        rc.update_card_triage,
+        rc._write_body,
+        rc._gh,
+        rc.os.unlink,
+    )
+    rc.find_card = fake_find
+    rc.get_card = fake_get
+    rc.mark_triage_queued = fake_mark
+    rc.dispatch_triage_workflow = fake_dispatch
+    rc.update_card_triage = fake_update
+    rc._write_body = fake_write_body
+    rc._gh = fake_gh
+    rc.os.unlink = lambda path: None
+    d = tempfile.mkdtemp()
+    raised = ""
+    try:
+        item_path = os.path.join(d, "item.json")
+        with open(item_path, "w") as f:
+            json.dump(it, f)
+        sys.argv = ["render_card.py", "queue-triage", "--item-file", item_path]
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                rc.main()
+        except RuntimeError as e:
+            raised = str(e)
+        out = buf.getvalue()
+    finally:
+        (
+            sys.argv,
+            rc.find_card,
+            rc.get_card,
+            rc.mark_triage_queued,
+            rc.dispatch_triage_workflow,
+            rc.update_card_triage,
+            rc._write_body,
+            rc._gh,
+            rc.os.unlink,
+        ) = old
+        shutil.rmtree(d, ignore_errors=True)
+
+    state = core.parse_state_block(current["body"])
+    check(
+        "queue cli: publish failure is surfaced",
+        "cleared queued triage cache for retry" in raised,
+    )
+    check(
+        "queue cli: dispatch failure warning is still printed",
+        "::warning::failed to dispatch auto triage" in out,
+    )
+    check("queue cli: queued status is cleared for retry", "triage_status" not in state)
+    check("queue cli: queued revision is cleared for retry", "triaged_sha" not in state)
+
+
+def test_reconcile_dispatch_failure_publish_failure_clears_cache():
+    it = item(auto_triage=True)
+    row = card_row(it)
+    row["state"] = core.parse_state_block(row["body"])
+
+    def fake_mark(number, queued_item, body):
+        row["body"] = rc.body_with_triage_queued(body, queued_item)
+        return True
+
+    def fake_dispatch(number, queued_item):
+        raise RuntimeError("workflow dispatch unavailable")
+
+    def fake_update(number, revision, triage=None, error=None, owner=""):
+        raise RuntimeError("card edit unavailable")
+
+    def fake_get(number):
+        current = dict(row)
+        current["state"] = "OPEN"
+        return current
+
+    written = {}
+
+    def fake_write_body(body):
+        path = "/tmp/wheelhouse-test-reconcile-clear-body"
+        written[path] = body
+        return path
+
+    def fake_gh(args, check=True):
+        if args[:2] == ["issue", "edit"]:
+            path = args[args.index("--body-file") + 1]
+            row["body"] = written[path]
+        return None
+
+    old = (
+        reconcile.render_card.mark_triage_queued,
+        reconcile.render_card.dispatch_triage_workflow,
+        reconcile.render_card.update_card_triage,
+        reconcile.render_card.get_card,
+        reconcile.render_card._write_body,
+        reconcile.render_card._gh,
+        reconcile.render_card.os.unlink,
+    )
+    reconcile.render_card.mark_triage_queued = fake_mark
+    reconcile.render_card.dispatch_triage_workflow = fake_dispatch
+    reconcile.render_card.update_card_triage = fake_update
+    reconcile.render_card.get_card = fake_get
+    reconcile.render_card._write_body = fake_write_body
+    reconcile.render_card._gh = fake_gh
+    reconcile.render_card.os.unlink = lambda path: None
+    raised = ""
+    try:
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                reconcile.maybe_queue_auto_triage(it, row, True, owner="acme")
+        except RuntimeError as e:
+            raised = str(e)
+        out = buf.getvalue()
+    finally:
+        (
+            reconcile.render_card.mark_triage_queued,
+            reconcile.render_card.dispatch_triage_workflow,
+            reconcile.render_card.update_card_triage,
+            reconcile.render_card.get_card,
+            reconcile.render_card._write_body,
+            reconcile.render_card._gh,
+            reconcile.render_card.os.unlink,
+        ) = old
+
+    state = core.parse_state_block(row["body"])
+    check(
+        "reconcile: publish failure is surfaced",
+        "cleared queued triage cache for retry" in raised,
+    )
+    check(
+        "reconcile: dispatch failure warning is still printed",
+        "::warning::failed to dispatch auto triage" in out,
+    )
+    check("reconcile: queued status is cleared for retry", "triage_status" not in state)
+    check("reconcile: queued revision is cleared for retry", "triaged_sha" not in state)
 
 
 def test_reconcile_queues_after_head_refresh():
@@ -1293,6 +1521,10 @@ def test_triage_workflow_security_wiring():
     prepare = step_by_id(steps, "prepare")
     preserve = step_by_id(steps, "triage-result")
     update = step_by_name(steps, "Update the decision card")
+    fallback = step_by_name(
+        steps,
+        "Clear queued triage cache if trusted source is unavailable",
+    )
 
     checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
     check(
@@ -1337,6 +1569,10 @@ def test_triage_workflow_security_wiring():
             'echo "path=$trusted"' in run
             and 'echo "python=$python_path"' in run
             and 'echo "safe_path=$safe_path"' in run,
+        )
+        check(
+            "workflow: trusted source can be prepared before setup-python",
+            'command -v python3 || command -v python' in run,
         )
 
     check("workflow: resolve gate exists", resolve is not None)
@@ -1523,6 +1759,8 @@ def test_triage_workflow_security_wiring():
     )
 
     trusted_i = step_index(steps, lambda s: s.get("id") == "trusted-src")
+    setup_i = step_index(steps, lambda s: "actions/setup-python" in str(s.get("uses", "")))
+    install_i = step_index(steps, lambda s: s.get("name") == "Install deps")
     preserve_i = step_index(steps, lambda s: s.get("id") == "triage-result")
     update_i = step_index(steps, lambda s: s.get("name") == "Update the decision card")
     claude_indexes = [
@@ -1535,6 +1773,11 @@ def test_triage_workflow_security_wiring():
         and all(trusted_i < i for i in claude_indexes),
     )
     check(
+        "workflow: trusted source is prepared before setup and deps",
+        None not in (trusted_i, setup_i, install_i)
+        and trusted_i < setup_i < install_i,
+    )
+    check(
         "workflow: triage result handoff runs after Claude",
         preserve_i is not None
         and claude_indexes
@@ -1544,6 +1787,270 @@ def test_triage_workflow_security_wiring():
         "workflow: trusted card update runs after isolated handoff",
         None not in (preserve_i, update_i) and preserve_i < update_i,
     )
+
+    recover = step_by_name(steps, "Recover a held card if this run never reached the update step")
+    check("workflow: held-card recovery step exists", recover is not None)
+    if recover:
+        check(
+            "workflow: recovery step does not depend on Claude token gate",
+            recover.get("if") == "always() && steps.trusted-src.outputs.path != ''",
+        )
+        env = recover.get("env", {})
+        check(
+            "workflow: recovery step reads RAW dispatch inputs, never resolve outputs",
+            env.get("ISSUE") == "${{ github.event.inputs.issue }}"
+            and env.get("KIND") == "${{ github.event.inputs.kind }}"
+            and env.get("HEAD_SHA") == "${{ github.event.inputs.head_sha }}"
+            and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}",
+        )
+        check(
+            "workflow: recovery step can detect token-gate skips",
+            env.get("TRIAGE_GATE_ENABLED") == "${{ steps.gate.outputs.enabled }}",
+        )
+        check("workflow: recovery step is hardened like the update step", hardened_shell_env(recover))
+        run = str(recover.get("run", ""))
+        check(
+            "workflow: recovery step calls triage-recover with issue/kind/revision",
+            "scripts/render_card.py triage-recover" in run
+            and "--issue \"$ISSUE\"" in run
+            and "--kind \"$KIND\"" in run
+            and "--revision \"$REVISION\"" in run
+            and "--message \"$RECOVER_MESSAGE\"" in run,
+        )
+        check(
+            "workflow: recovery step publishes token-unavailable failures",
+            "CLAUDE_CODE_OAUTH_TOKEN is absent" in run,
+        )
+        check(
+            "workflow: recovery step runs under the default token (no FLEET_TOKEN)",
+            env.get("GH_TOKEN") == "${{ github.token }}"
+            and "FLEET_TOKEN" not in yaml.safe_dump(recover),
+        )
+    check("workflow: no-source queued-cache fallback exists", fallback is not None)
+    if fallback:
+        env = fallback.get("env", {})
+        run = str(fallback.get("run", ""))
+        check(
+            "workflow: no-source fallback runs only when trusted source is absent",
+            fallback.get("if") == "always() && steps.trusted-src.outputs.path == ''",
+        )
+        check(
+            "workflow: no-source fallback reads RAW dispatch inputs",
+            env.get("ISSUE") == "${{ github.event.inputs.issue }}"
+            and env.get("KIND") == "${{ github.event.inputs.kind }}"
+            and env.get("HEAD_SHA") == "${{ github.event.inputs.head_sha }}"
+            and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}",
+        )
+        check(
+            "workflow: no-source fallback uses only the card token",
+            env.get("GH_TOKEN") == "${{ github.token }}"
+            and "FLEET_TOKEN" not in yaml.safe_dump(fallback),
+        )
+        check(
+            "workflow: no-source fallback clears queued cache for retry",
+            "triaged_sha" in run
+            and "triage_status" in run
+            and "gh issue edit" in run
+            and "future scan can retry" in run,
+        )
+    recover_i = step_index(
+        steps,
+        lambda s: s.get("name")
+        == "Recover a held card if this run never reached the update step",
+    )
+    check(
+        "workflow: recovery step runs after the update step",
+        None not in (update_i, recover_i) and update_i < recover_i,
+    )
+
+
+def test_render_card_recovery_import_does_not_require_pyyaml():
+    code = r'''
+import importlib.abc
+import os
+import sys
+
+class BlockYaml(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "yaml" or fullname.startswith("yaml."):
+            raise ImportError("blocked yaml")
+        return None
+
+sys.meta_path.insert(0, BlockYaml())
+sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+import render_card
+print(render_card.HOLD_LABEL)
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    check(
+        "recovery: render_card imports without PyYAML installed",
+        result.returncode == 0 and result.stdout.strip() == rc.HOLD_LABEL,
+    )
+
+
+def test_triage_recover_cli_publishes_a_stuck_held_card():
+    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+        revision = it["head_sha"] if kind == "pr-review" else it["updated_at"]
+        held_card = rc.render(it, held=True)
+        held_card["body"] = rc.body_with_triage_queued(held_card["body"], it)
+        existing = {
+            "number": 7,
+            "body": held_card["body"],
+            "labels": labels(*held_card["labels"]),
+            "state": "OPEN",
+        }
+        calls = {"gh_calls": []}
+        old = (sys.argv[:], rc.get_card, rc._write_body, rc._gh, rc.os.unlink)
+        rc.get_card = lambda number: existing
+        rc._write_body, rc._gh = _mock_edit(calls)
+        rc.os.unlink = lambda path: None
+        try:
+            sys.argv = [
+                "render_card.py",
+                "triage-recover",
+                "--issue",
+                "7",
+                "--kind",
+                kind,
+                "--revision",
+                revision,
+                "--message",
+                "Auto triage could not run because CLAUDE_CODE_OAUTH_TOKEN is absent.",
+            ]
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc.main()
+            out = buf.getvalue()
+        finally:
+            sys.argv, rc.get_card, rc._write_body, rc._gh, rc.os.unlink = old
+        check(
+            "recover(%s): warns that the run never reached the update step" % kind,
+            "::warning::auto triage run did not reach its update step" in out,
+        )
+        new_state = core.parse_state_block(calls["body"])
+        check("recover(%s): held key removed" % kind, "held" not in new_state)
+        check(
+            "recover(%s): checkboxes now present" % kind,
+            "<!-- opt:close -->" in calls["body"],
+        )
+        check(
+            "recover(%s): custom failure message is attached" % kind,
+            "CLAUDE_CODE_OAUTH_TOKEN is absent" in calls["body"],
+        )
+        check(
+            "recover(%s): hold label removed via gh edit" % kind,
+            any(rc.HOLD_LABEL in c for c in calls["gh_calls"]),
+        )
+
+
+def test_triage_recover_cli_is_noop_when_not_stuck():
+    it = item()
+    revision = it["head_sha"]
+
+    # Case 1: card was never held (already published) -> no-op.
+    published = rc.render(it)
+    never_held = {
+        "number": 7,
+        "body": published["body"],
+        "labels": labels(*published["labels"]),
+        "state": "OPEN",
+    }
+
+    # Case 2: held, and already published for THIS revision by the real
+    # "Update the decision card" step earlier in the same run (status is no
+    # longer "queued") -> no-op, must not double-write over a real result.
+    held_card = rc.render(it, held=True)
+    held_card["body"] = rc.body_with_triage_queued(held_card["body"], it)
+    already_applied_body = rc.update_card_triage
+    # Simulate that publish having already happened (drive it through the
+    # real function, not by hand-crafting a body).
+    old_get_card = rc.get_card
+    old_write, old_gh, old_unlink = rc._write_body, rc._gh, rc.os.unlink
+    rc.get_card = lambda number: {
+        "number": 7,
+        "body": held_card["body"],
+        "labels": labels(*held_card["labels"]),
+        "state": "OPEN",
+    }
+    apply_calls = {"gh_calls": []}
+    rc._write_body, rc._gh = _mock_edit(apply_calls)
+    rc.os.unlink = lambda path: None
+    rc.update_card_triage(
+        7,
+        revision,
+        triage={
+            "summary": "does X",
+            "product_implications": "low risk",
+            "recommended_next_step": "merge - straightforward",
+        },
+        owner="acme",
+    )
+    rc.get_card, rc._write_body, rc._gh, rc.os.unlink = (
+        old_get_card,
+        old_write,
+        old_gh,
+        old_unlink,
+    )
+    already_published = {
+        "number": 7,
+        "body": apply_calls["body"],
+        "labels": labels(
+            *[l for l in held_card["labels"] if l != rc.HOLD_LABEL]
+        ),
+        "state": "OPEN",
+    }
+    check(
+        "recover setup: case 2 card is genuinely published (sanity)",
+        "held" not in core.parse_state_block(already_published["body"]),
+    )
+    check(
+        "recover setup: update_card_triage is the same function used above",
+        already_applied_body is rc.update_card_triage,
+    )
+
+    # Case 3: held, queued, but for a DIFFERENT (superseded) revision -> no-op.
+    held_stale = rc.render(item(head_sha="newer-revision"), held=True)
+    held_stale["body"] = rc.body_with_triage_queued(held_stale["body"], it)
+    stale_revision = {
+        "number": 7,
+        "body": held_stale["body"],
+        "labels": labels(*held_stale["labels"]),
+        "state": "OPEN",
+    }
+
+    for label, existing in (
+        ("never held", never_held),
+        ("already published this run", already_published),
+        ("stale revision", stale_revision),
+    ):
+        calls = {"gh_calls": []}
+        old = (sys.argv[:], rc.get_card, rc._write_body, rc._gh)
+        rc.get_card = lambda number: existing
+        rc._write_body, rc._gh = _mock_edit(calls)
+        try:
+            sys.argv = [
+                "render_card.py",
+                "triage-recover",
+                "--issue",
+                "7",
+                "--kind",
+                "pr-review",
+                "--revision",
+                revision,
+            ]
+            with redirect_stdout(io.StringIO()):
+                rc.main()
+        finally:
+            sys.argv, rc.get_card, rc._write_body, rc._gh = old
+        check(
+            "recover no-op (%s): no card write happened" % label,
+            calls["gh_calls"] == [],
+        )
 
 
 def test_scan_and_ingest_can_dispatch_with_default_token():
@@ -1588,6 +2095,690 @@ def test_scan_and_ingest_can_dispatch_with_default_token():
     )
 
 
+# --------------------------------------------------------------------------- #
+# Held cards (visibility gated on the first auto-triage attempt completing)
+# --------------------------------------------------------------------------- #
+def test_should_hold_gates():
+    it = item(auto_triage=True)
+    check("hold: eligible pr-review with token", rc.should_hold(it, True) is True)
+    check("hold: no token -> never held", rc.should_hold(it, False) is False)
+    check(
+        "hold: auto_triage off (item-level opt-out) -> never held",
+        rc.should_hold(item(auto_triage=False), True) is False,
+    )
+    check(
+        "hold: ci-approval is never held (no auto triage for that kind)",
+        rc.should_hold(item(kind="ci-approval"), True) is False,
+    )
+    check(
+        "hold: missing head_sha -> no revision to cache against -> never held",
+        rc.should_hold(item(head_sha=""), True) is False,
+    )
+
+    it_issue = item_issue(auto_triage_issues=True)
+    check(
+        "hold: eligible issue-triage with token", rc.should_hold(it_issue, True) is True
+    )
+    check(
+        "hold: auto_triage_issues off -> never held",
+        rc.should_hold(item_issue(auto_triage_issues=False), True) is False,
+    )
+    check(
+        "hold: missing updated_at -> never held",
+        rc.should_hold(item_issue(updated_at=""), True) is False,
+    )
+    check(
+        "hold: pr-review flag does not affect issue-triage (independent toggles)",
+        rc.should_hold(item_issue(auto_triage=False, auto_triage_issues=True), True)
+        is True,
+    )
+
+
+def test_render_held_card_placeholder_and_labels():
+    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+        held = rc.render(it, held=True)
+        check(
+            "held render(%s): no checkbox markers - inert to the handler" % kind,
+            "<!-- opt:" not in held["body"],
+        )
+        check(
+            "held render(%s): hold label present" % kind, rc.HOLD_LABEL in held["labels"]
+        )
+        check(
+            "held render(%s): needs-decision retained (triage.yml requires it)" % kind,
+            "needs-decision" in held["labels"],
+        )
+        state = core.parse_state_block(held["body"])
+        check(
+            "held render(%s): state carries held=true" % kind,
+            state.get("held") is True,
+        )
+        check(
+            "held render(%s): state still carries the full option set" % kind,
+            state.get("options") == rc.card_options(it),
+        )
+        check(
+            "held render(%s): held is not a material field" % kind,
+            "held" not in rc.MATERIAL_FIELDS,
+        )
+
+        unheld = rc.render(it)
+        check(
+            "default render(%s) is unheld (backward compatible)" % kind,
+            "<!-- opt:" in unheld["body"] and rc.HOLD_LABEL not in unheld["labels"],
+        )
+
+
+def test_upsert_card_creates_held_only_when_triage_would_be_queued():
+    old_find, old_ensure, old_create = (
+        rc.find_card,
+        rc.ensure_labels,
+        rc._create_card,
+    )
+    rc.find_card = lambda marker: None
+    rc.ensure_labels = lambda labels_: None
+    scenarios = [
+        ("pr-review token+config on -> held", item(auto_triage=True), True, True),
+        ("pr-review no token -> unheld", item(auto_triage=True), False, False),
+        (
+            "pr-review config off -> unheld",
+            item(auto_triage=False),
+            True,
+            False,
+        ),
+        (
+            "issue-triage token+config on -> held",
+            item_issue(auto_triage_issues=True),
+            True,
+            True,
+        ),
+        (
+            "issue-triage config off -> unheld",
+            item_issue(auto_triage_issues=False),
+            True,
+            False,
+        ),
+        ("ci-approval never held", item(kind="ci-approval"), True, False),
+    ]
+    try:
+        for label, scenario_item, has_token, expect_held in scenarios:
+            captured = {}
+            rc._create_card = lambda card: captured.update(card) or 99
+            number = rc.upsert_card(scenario_item, has_token=has_token)
+            check("create: %s" % label, number == 99)
+            check(
+                "create labels: %s" % label,
+                (rc.HOLD_LABEL in captured["labels"]) == expect_held,
+            )
+            check(
+                "create body: %s" % label,
+                ("<!-- opt:" not in captured["body"]) == expect_held,
+            )
+    finally:
+        rc.find_card, rc.ensure_labels, rc._create_card = (
+            old_find,
+            old_ensure,
+            old_create,
+        )
+
+
+def test_upsert_card_refresh_preserves_held_when_still_eligible():
+    for kind, base, changed in (
+        ("pr-review", item(auto_triage=True, head_sha="oldsha"), item(auto_triage=True, head_sha="newsha999")),
+        (
+            "issue-triage",
+            item_issue(auto_triage_issues=True, priority="low"),
+            item_issue(auto_triage_issues=True, priority="high"),
+        ),
+    ):
+        held_card = rc.render(base, held=True)
+        existing = {
+            "number": 7,
+            "body": held_card["body"],
+            "labels": labels(*held_card["labels"]),
+        }
+        captured = {}
+        old_get_card, old_refresh, old_ensure = (
+            rc.get_card,
+            rc._refresh_card,
+            rc.ensure_labels,
+        )
+        rc.get_card = lambda number: existing if int(number) == 7 else None
+        rc.ensure_labels = lambda labels_: None
+
+        def fake_refresh(
+            number, card, existing_, item_, old_state, preserve_triage=True
+        ):
+            captured["card"] = card
+            return number
+
+        rc._refresh_card = fake_refresh
+        try:
+            result = rc.upsert_card(changed, existing=existing, has_token=True)
+        finally:
+            rc.get_card, rc._refresh_card, rc.ensure_labels = (
+                old_get_card,
+                old_refresh,
+                old_ensure,
+            )
+        check("refresh(%s): held card is refreshed" % kind, result == 7)
+        check(
+            "refresh(%s): held card stays held across a material refresh" % kind,
+            rc.HOLD_LABEL in captured["card"]["labels"],
+        )
+        check(
+            "refresh(%s): refreshed held body still has no checkboxes" % kind,
+            "<!-- opt:" not in captured["card"]["body"],
+        )
+
+
+def _capture_upsert_refresh(base_item, changed_item, has_token, queued=False):
+    held_card = rc.render(base_item, held=True)
+    if queued:
+        held_card["body"] = rc.body_with_triage_queued(held_card["body"], base_item)
+        state = core.parse_state_block(held_card["body"])
+        state["triage_error"] = "dispatch failed"
+        held_card["body"] = rc._replace_state_block(held_card["body"], state)
+    existing = {
+        "number": 7,
+        "body": held_card["body"],
+        "labels": labels(*held_card["labels"]),
+        "state": "OPEN",
+    }
+    calls = {"gh_calls": []}
+    old = (rc.get_card, rc.ensure_labels, rc._write_body, rc._gh)
+
+    def fake_write(body):
+        calls["body"] = body
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(body)
+            return f.name
+
+    def fake_gh(args, check=True):
+        calls["gh_calls"].append(args)
+        return None
+
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    rc.ensure_labels = lambda labels_: None
+    rc._write_body = fake_write
+    rc._gh = fake_gh
+    try:
+        calls["result"] = rc.upsert_card(
+            changed_item, existing=existing, has_token=has_token
+        )
+    finally:
+        rc.get_card, rc.ensure_labels, rc._write_body, rc._gh = old
+    return calls
+
+
+def _run_reconcile_real_upsert_refresh(
+    base_item, changed_item, token="true", queued=False
+):
+    held = rc.render(base_item, held=True)
+    if queued:
+        held["body"] = rc.body_with_triage_queued(held["body"], base_item)
+        state = core.parse_state_block(held["body"])
+        state["triage_error"] = "dispatch failed"
+        held["body"] = rc._replace_state_block(held["body"], state)
+    row = {
+        "number": 7,
+        "body": held["body"],
+        "labels": labels(*held["labels"]),
+        "title": held["title"],
+        "state": "OPEN",
+    }
+    current_by_number = {7: dict(row)}
+    calls = {"gh_calls": []}
+    old = (
+        sys.argv[:],
+        reconcile.render_card.get_card,
+        reconcile.render_card.ensure_labels,
+        reconcile.render_card._write_body,
+        reconcile.render_card._gh,
+        os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"),
+    )
+
+    def fake_get(number):
+        return current_by_number.get(int(number))
+
+    def fake_write(body):
+        calls["body"] = body
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write(body)
+            return f.name
+
+    def fake_gh(args, check=True):
+        calls["gh_calls"].append(args)
+        if args[:3] == ["issue", "edit", "7"]:
+            current = current_by_number[7]
+            current["body"] = calls["body"]
+            names = {label["name"] for label in current.get("labels", [])}
+            i = 0
+            while i < len(args):
+                if args[i] == "--add-label":
+                    names.add(args[i + 1])
+                    i += 2
+                elif args[i] == "--remove-label":
+                    names.discard(args[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            current["labels"] = labels(*sorted(names))
+        return None
+
+    reconcile.render_card.get_card = fake_get
+    reconcile.render_card.ensure_labels = lambda labels_: None
+    reconcile.render_card._write_body = fake_write
+    reconcile.render_card._gh = fake_gh
+    os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = token
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            scan_path = os.path.join(d, "scan.json")
+            cards_path = os.path.join(d, "cards.json")
+            with open(scan_path, "w") as f:
+                json.dump(scan_payload([changed_item]), f)
+            with open(cards_path, "w") as f:
+                json.dump([row], f)
+            sys.argv = ["reconcile.py", scan_path, cards_path]
+            with redirect_stdout(io.StringIO()):
+                reconcile.main()
+    finally:
+        (
+            sys.argv,
+            reconcile.render_card.get_card,
+            reconcile.render_card.ensure_labels,
+            reconcile.render_card._write_body,
+            reconcile.render_card._gh,
+            old_token,
+        ) = old
+        if old_token is None:
+            os.environ.pop("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN", None)
+        else:
+            os.environ["WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN"] = old_token
+    calls["card"] = current_by_number[7]
+    return calls
+
+
+def test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off():
+    scenarios = [
+        (
+            "kind changed to ci-approval",
+            item(auto_triage=True, head_sha="oldsha"),
+            item(kind="ci-approval", auto_triage=True, head_sha="newsha999"),
+            True,
+        ),
+        (
+            "pr auto-triage config disabled",
+            item(auto_triage=True, head_sha="oldsha"),
+            item(auto_triage=False, head_sha="oldsha"),
+            True,
+        ),
+        (
+            "issue auto-triage config disabled",
+            item_issue(auto_triage_issues=True, priority="low"),
+            item_issue(auto_triage_issues=False, priority="low"),
+            True,
+        ),
+        (
+            "token absent",
+            item(auto_triage=True, head_sha="oldsha"),
+            item(auto_triage=True, head_sha="oldsha"),
+            False,
+        ),
+    ]
+    for label, base_item, changed_item, has_token in scenarios:
+        calls = _capture_upsert_refresh(
+            base_item, changed_item, has_token, queued=True
+        )
+        body = calls.get("body", "")
+        state = core.parse_state_block(body)
+        edit = calls["gh_calls"][0] if calls["gh_calls"] else []
+        check("refresh publish(%s): card refreshed" % label, calls["result"] == 7)
+        check("refresh publish(%s): held state cleared" % label, "held" not in state)
+        check(
+            "refresh publish(%s): decision checkboxes restored" % label,
+            "<!-- opt:" in body,
+        )
+        check(
+            "refresh publish(%s): no triage section added" % label,
+            rc.TRIAGE_START not in body,
+        )
+        check(
+            "refresh publish(%s): pending label removed" % label,
+            "--remove-label" in edit and rc.HOLD_LABEL in edit,
+        )
+        check(
+            "refresh publish(%s): queued cache cleared" % label,
+            "triaged_sha" not in state
+            and "triage_status" not in state
+            and "triage_error" not in state,
+        )
+
+    restored = item(auto_triage=True, head_sha="oldsha")
+    calls = _capture_upsert_refresh(
+        restored,
+        item(auto_triage=False, head_sha="oldsha"),
+        has_token=True,
+        queued=True,
+    )
+    state = core.parse_state_block(calls.get("body", ""))
+    check(
+        "refresh publish: restored eligibility queues same revision",
+        rc.should_auto_triage(
+            restored, state, labels("needs-decision", "kind:pr-review"), True
+        )
+        is True,
+    )
+
+
+def test_reconcile_refresh_preserves_held_when_still_eligible():
+    old = item(head_sha="oldsha", auto_triage=True)
+    new = item(head_sha="newsha999", auto_triage=True)
+    calls = _run_reconcile_real_upsert_refresh(old, new, token="true")
+    body = calls["card"]["body"]
+    state = core.parse_state_block(body)
+    label_names = {label["name"] for label in calls["card"]["labels"]}
+    check("reconcile: still-eligible held card stays held", state.get("held") is True)
+    check("reconcile: still-eligible held card stays inert", "<!-- opt:" not in body)
+    check(
+        "reconcile: still-eligible held card keeps pending label",
+        rc.HOLD_LABEL in label_names,
+    )
+
+
+def test_reconcile_refresh_publishes_held_when_hold_gate_turns_off():
+    scenarios = [
+        (
+            "config disabled",
+            item(head_sha="oldsha", auto_triage=True),
+            item(head_sha="oldsha", auto_triage=False),
+            "true",
+        ),
+        (
+            "token absent",
+            item(head_sha="oldsha", auto_triage=True),
+            item(head_sha="oldsha", auto_triage=True),
+            "",
+        ),
+    ]
+    for label, old, new, token in scenarios:
+        calls = _run_reconcile_real_upsert_refresh(old, new, token=token, queued=True)
+        body = calls["card"]["body"]
+        state = core.parse_state_block(body)
+        label_names = {label["name"] for label in calls["card"]["labels"]}
+        check(
+            "reconcile(%s): ineligible held card clears held" % label,
+            "held" not in state,
+        )
+        check(
+            "reconcile(%s): ineligible held card restores checkboxes" % label,
+            "<!-- opt:" in body,
+        )
+        check(
+            "reconcile(%s): ineligible held card removes pending label" % label,
+            rc.HOLD_LABEL not in label_names,
+        )
+        check(
+            "reconcile(%s): ineligible held card has no triage section" % label,
+            rc.TRIAGE_START not in body,
+        )
+        check(
+            "reconcile(%s): ineligible held card clears queued cache" % label,
+            "triaged_sha" not in state
+            and "triage_status" not in state
+            and "triage_error" not in state,
+        )
+
+
+def test_upsert_card_held_no_churn_when_unchanged():
+    it = item(auto_triage=True)
+    held_card = rc.render(it, held=True)
+    existing = {
+        "number": 7,
+        "body": held_card["body"],
+        "labels": labels(*held_card["labels"]),
+    }
+    old_get_card = rc.get_card
+    rc.get_card = lambda number: existing if int(number) == 7 else None
+    try:
+        result = rc.upsert_card(it, existing=existing, has_token=True)
+    finally:
+        rc.get_card = old_get_card
+    check("held: unchanged held card is a full no-op", result == 7)
+
+
+def _mock_edit(calls):
+    def fake_write(body):
+        calls["body"] = body
+        return "/tmp/wheelhouse-test-publish-body"
+
+    def fake_gh(args, check=True):
+        calls.setdefault("gh_calls", []).append(args)
+        return None
+
+    return fake_write, fake_gh
+
+
+def test_update_card_triage_publishes_held_card_on_success():
+    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+        revision = it["head_sha"] if kind == "pr-review" else it["updated_at"]
+        held_card = rc.render(it, held=True)
+        existing = {
+            "number": 7,
+            "body": held_card["body"],
+            "labels": labels(*held_card["labels"]),
+            "state": "OPEN",
+        }
+        calls = {"gh_calls": []}
+        old_get_card, old_write, old_gh, old_unlink = (
+            rc.get_card,
+            rc._write_body,
+            rc._gh,
+            rc.os.unlink,
+        )
+        rc.get_card = lambda number: existing
+        rc._write_body, rc._gh = _mock_edit(calls)
+        rc.os.unlink = lambda path: None
+        try:
+            ok = rc.update_card_triage(
+                7,
+                revision,
+                triage={
+                    "summary": "does X",
+                    "product_implications": "low risk",
+                    "recommended_next_step": "merge - straightforward",
+                },
+                owner="acme",
+            )
+        finally:
+            rc.get_card, rc._write_body, rc._gh, rc.os.unlink = (
+                old_get_card,
+                old_write,
+                old_gh,
+                old_unlink,
+            )
+        check("publish(%s): update_card_triage reports success" % kind, ok is True)
+        new_state = core.parse_state_block(calls["body"])
+        check("publish(%s): held key removed" % kind, "held" not in new_state)
+        check(
+            "publish(%s): checkboxes now present" % kind,
+            "<!-- opt:close -->" in calls["body"],
+        )
+        check("publish(%s): triage section inserted" % kind, "### Triage" in calls["body"])
+        check(
+            "publish(%s): triage status succeeded" % kind,
+            new_state.get("triage_status") == "succeeded",
+        )
+        check(
+            "publish(%s): hold label removed via gh edit" % kind,
+            any(rc.HOLD_LABEL in c for c in calls["gh_calls"]),
+        )
+
+
+def test_update_card_triage_publishes_held_card_on_failure_fail_open():
+    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+        revision = it["head_sha"] if kind == "pr-review" else it["updated_at"]
+        held_card = rc.render(it, held=True)
+        existing = {
+            "number": 7,
+            "body": held_card["body"],
+            "labels": labels(*held_card["labels"]),
+            "state": "OPEN",
+        }
+        calls = {"gh_calls": []}
+        old_get_card, old_write, old_gh, old_unlink = (
+            rc.get_card,
+            rc._write_body,
+            rc._gh,
+            rc.os.unlink,
+        )
+        rc.get_card = lambda number: existing
+        rc._write_body, rc._gh = _mock_edit(calls)
+        rc.os.unlink = lambda path: None
+        try:
+            ok = rc.update_card_triage(
+                7, revision, error="Claude timed out", owner="acme"
+            )
+        finally:
+            rc.get_card, rc._write_body, rc._gh, rc.os.unlink = (
+                old_get_card,
+                old_write,
+                old_gh,
+                old_unlink,
+            )
+        check(
+            "fail-open(%s): update_card_triage still reports success" % kind,
+            ok is True,
+        )
+        new_state = core.parse_state_block(calls["body"])
+        check(
+            "fail-open(%s): held key removed even though triage FAILED" % kind,
+            "held" not in new_state,
+        )
+        check(
+            "fail-open(%s): checkboxes now present despite failure" % kind,
+            "<!-- opt:close -->" in calls["body"],
+        )
+        check(
+            "fail-open(%s): failure note shown to the owner" % kind,
+            "Claude timed out" in calls["body"],
+        )
+        check(
+            "fail-open(%s): triage status recorded as error" % kind,
+            new_state.get("triage_status") == "error",
+        )
+        check(
+            "fail-open(%s): hold label removed via gh edit" % kind,
+            any(rc.HOLD_LABEL in c for c in calls["gh_calls"]),
+        )
+
+
+def test_update_card_triage_stale_revision_is_noop_for_held_card():
+    for kind, it in (("pr-review", item()), ("issue-triage", item_issue())):
+        held_card = rc.render(it, held=True)
+        existing = {
+            "number": 7,
+            "body": held_card["body"],
+            "labels": labels(*held_card["labels"]),
+            "state": "OPEN",
+        }
+        calls = {"gh_calls": []}
+        old_get_card, old_write, old_gh = rc.get_card, rc._write_body, rc._gh
+        rc.get_card = lambda number: existing
+        rc._write_body, rc._gh = _mock_edit(calls)
+        try:
+            ok = rc.update_card_triage(
+                7, "a-superseded-stale-revision", error="late", owner="acme"
+            )
+        finally:
+            rc.get_card, rc._write_body, rc._gh = old_get_card, old_write, old_gh
+        check(
+            "stale(%s): a superseded attempt's completion is a no-op" % kind,
+            ok is False,
+        )
+        check(
+            "stale(%s): no card write happened (stays held for the fresh attempt)"
+            % kind,
+            calls["gh_calls"] == [],
+        )
+
+
+def test_update_card_triage_unheld_card_behavior_unchanged():
+    """A regression check: for a card that was never held, `update_card_triage`
+    behaves exactly as before this feature - attach the triage section, no
+    label churn, no touching the (already-present) checkboxes."""
+    it = item()
+    card = rc.render(it)
+    existing = {
+        "number": 7,
+        "body": card["body"],
+        "labels": labels(*card["labels"]),
+        "state": "OPEN",
+    }
+    calls = {"gh_calls": []}
+    old_get_card, old_write, old_gh, old_unlink = (
+        rc.get_card,
+        rc._write_body,
+        rc._gh,
+        rc.os.unlink,
+    )
+    rc.get_card = lambda number: existing
+    rc._write_body, rc._gh = _mock_edit(calls)
+    rc.os.unlink = lambda path: None
+    try:
+        ok = rc.update_card_triage(
+            7,
+            it["head_sha"],
+            triage={
+                "summary": "does X",
+                "product_implications": "low risk",
+                "recommended_next_step": "merge - straightforward",
+            },
+            owner="acme",
+        )
+    finally:
+        rc.get_card, rc._write_body, rc._gh, rc.os.unlink = (
+            old_get_card,
+            old_write,
+            old_gh,
+            old_unlink,
+        )
+    check("unheld: update_card_triage still reports success", ok is True)
+    new_state = core.parse_state_block(calls["body"])
+    check("unheld: no held key ever appears", "held" not in new_state)
+    check(
+        "unheld: checkboxes were already present and remain",
+        "<!-- opt:merge -->" in calls["body"],
+    )
+    check(
+        "unheld: never touches the hold label (card was never held)",
+        not any(rc.HOLD_LABEL in c for c in calls["gh_calls"]),
+    )
+
+
+def test_reconcile_self_heals_close_held_card_whose_target_closed():
+    it = item(auto_triage=True)
+    held_row = card_row(
+        it,
+        label_names=(
+            "needs-decision",
+            "repo:wheelhouse",
+            "kind:pr-review",
+            "priority:med",
+            "target:wheelhouse-42",
+            rc.HOLD_LABEL,
+        ),
+    )
+    held_row["body"] = rc.render(it, held=True)["body"]
+    # The target PR is no longer open, and the scan emits no worklist item for it.
+    scan = scan_payload([], open_pr_numbers=())
+    calls = run_reconcile(scan, [held_row])
+    check(
+        "reconcile: held card whose target closed is still self-healed closed",
+        len(calls["close"]) == 1,
+    )
+
+
 def main():
     test_auto_triage_config_default_and_overrides()
     test_auto_triage_issues_config_default_and_overrides()
@@ -1610,12 +2801,30 @@ def main():
     test_reconcile_new_card_triage_is_idempotent_on_next_pass()
     test_queue_triage_cli_uses_known_issue_number_without_find_card()
     test_queue_triage_command_warns_on_dispatch_failure()
+    test_queue_triage_command_clears_cache_when_publish_fails()
+    test_reconcile_dispatch_failure_publish_failure_clears_cache()
     test_reconcile_queues_after_head_refresh()
     test_reconcile_queues_after_issue_updated_at_advance()
     test_auto_triage_toggles_are_independent_end_to_end()
     test_triage_workflow_issue_path_isolation()
     test_triage_workflow_security_wiring()
     test_scan_and_ingest_can_dispatch_with_default_token()
+    test_should_hold_gates()
+    test_render_held_card_placeholder_and_labels()
+    test_upsert_card_creates_held_only_when_triage_would_be_queued()
+    test_upsert_card_refresh_preserves_held_when_still_eligible()
+    test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off()
+    test_reconcile_refresh_preserves_held_when_still_eligible()
+    test_reconcile_refresh_publishes_held_when_hold_gate_turns_off()
+    test_upsert_card_held_no_churn_when_unchanged()
+    test_update_card_triage_publishes_held_card_on_success()
+    test_update_card_triage_publishes_held_card_on_failure_fail_open()
+    test_update_card_triage_stale_revision_is_noop_for_held_card()
+    test_update_card_triage_unheld_card_behavior_unchanged()
+    test_reconcile_self_heals_close_held_card_whose_target_closed()
+    test_render_card_recovery_import_does_not_require_pyyaml()
+    test_triage_recover_cli_publishes_a_stuck_held_card()
+    test_triage_recover_cli_is_noop_when_not_stuck()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))

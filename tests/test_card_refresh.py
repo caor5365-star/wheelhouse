@@ -19,7 +19,8 @@ event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) rely on
   * the label replace - `plan_label_update` removes stale wheelhouse-managed
     labels (`repo:`/`kind:`/`priority:`/`target:`) while keeping
     `needs-decision` and any human-added label, and is a no-op when nothing
-    changed;
+    changed. Held-card tests cover the same helper's exact `pending-triage`
+    label sync;
   * the state block now carries the material fields and round-trips, so the
     change check is cheap and deterministic.
 """
@@ -548,7 +549,9 @@ def test_render_version_current_and_qualified_triage_is_noop():
     old_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
     rc.get_card = lambda number: existing if int(number) == 7 else None
     rc.ensure_labels = lambda labels_: None
-    rc._refresh_card = lambda *args: calls.__setitem__("refresh", calls["refresh"] + 1)
+    rc._refresh_card = lambda *args, **kwargs: calls.__setitem__(
+        "refresh", calls["refresh"] + 1
+    )
     os.environ["GITHUB_REPOSITORY_OWNER"] = "kunchenguid"
     try:
         result = rc.upsert_card(it, existing=existing)
@@ -769,7 +772,9 @@ def test_upsert_refetches_known_card_before_refresh():
     old_create = rc._create_card
     old_ensure = rc.ensure_labels
     rc.get_card = lambda number: current if int(number) == 7 else None
-    rc._refresh_card = lambda *args: calls.__setitem__("refresh", calls["refresh"] + 1)
+    rc._refresh_card = lambda *args, **kwargs: calls.__setitem__(
+        "refresh", calls["refresh"] + 1
+    )
     rc._create_card = lambda *args: calls.__setitem__("create", calls["create"] + 1)
     rc.ensure_labels = lambda labels_: None
     try:
@@ -805,7 +810,7 @@ def test_upsert_parses_state_block_after_refetch():
         "state": "OPEN",
     }
 
-    def fake_refresh(number, card, existing_, item_, old_state):
+    def fake_refresh(number, card, existing_, item_, old_state, preserve_triage=True):
         calls["refresh"] += 1
         calls["old_state"] = old_state
         return number

@@ -4,6 +4,9 @@ name: ingest
 # maintainer's decision, and we create or refresh a decision-card issue for it.
 # For eligible PR-review or issue-triage cards, this also queues the advisory
 # auto-triage workflow after writing the per-revision cache marker.
+# A brand-new eligible card is created HELD (`pending-triage`, no decision
+# checkboxes) before that first attempt, then published when the attempt
+# completes or fails open.
 # This path trusts the explicit dispatch payload; the scheduled scan's
 # owner/maintainer/bot author filter and merge-conflict needs-rebase routing are
 # not applied here.
@@ -101,6 +104,10 @@ jobs:
           # keeps card activity from re-triggering the decision handler.
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          # Same signal the "Queue auto triage" step below gates on: a
+          # brand-new eligible card is created HELD only when triage will
+          # actually be queued for it (see AGENTS.md "Held cards").
+          WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: python scripts/render_card.py upsert --item-file item.json
 
       - id: auto-triage-gate
