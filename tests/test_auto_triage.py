@@ -9,6 +9,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -1519,6 +1520,10 @@ def test_triage_workflow_security_wiring():
     prepare = step_by_id(steps, "prepare")
     preserve = step_by_id(steps, "triage-result")
     update = step_by_name(steps, "Update the decision card")
+    fallback = step_by_name(
+        steps,
+        "Clear queued triage cache if trusted source is unavailable",
+    )
 
     checkouts = [s for s in steps if "actions/checkout" in str(s.get("uses", ""))]
     check(
@@ -1563,6 +1568,10 @@ def test_triage_workflow_security_wiring():
             'echo "path=$trusted"' in run
             and 'echo "python=$python_path"' in run
             and 'echo "safe_path=$safe_path"' in run,
+        )
+        check(
+            "workflow: trusted source can be prepared before setup-python",
+            'command -v python3 || command -v python' in run,
         )
 
     check("workflow: resolve gate exists", resolve is not None)
@@ -1749,6 +1758,8 @@ def test_triage_workflow_security_wiring():
     )
 
     trusted_i = step_index(steps, lambda s: s.get("id") == "trusted-src")
+    setup_i = step_index(steps, lambda s: "actions/setup-python" in str(s.get("uses", "")))
+    install_i = step_index(steps, lambda s: s.get("name") == "Install deps")
     preserve_i = step_index(steps, lambda s: s.get("id") == "triage-result")
     update_i = step_index(steps, lambda s: s.get("name") == "Update the decision card")
     claude_indexes = [
@@ -1759,6 +1770,11 @@ def test_triage_workflow_security_wiring():
         trusted_i is not None
         and claude_indexes
         and all(trusted_i < i for i in claude_indexes),
+    )
+    check(
+        "workflow: trusted source is prepared before setup and deps",
+        None not in (trusted_i, setup_i, install_i)
+        and trusted_i < setup_i < install_i,
     )
     check(
         "workflow: triage result handoff runs after Claude",
@@ -1809,6 +1825,33 @@ def test_triage_workflow_security_wiring():
             env.get("GH_TOKEN") == "${{ github.token }}"
             and "FLEET_TOKEN" not in yaml.safe_dump(recover),
         )
+    check("workflow: no-source queued-cache fallback exists", fallback is not None)
+    if fallback:
+        env = fallback.get("env", {})
+        run = str(fallback.get("run", ""))
+        check(
+            "workflow: no-source fallback runs only when trusted source is absent",
+            fallback.get("if") == "always() && steps.trusted-src.outputs.path == ''",
+        )
+        check(
+            "workflow: no-source fallback reads RAW dispatch inputs",
+            env.get("ISSUE") == "${{ github.event.inputs.issue }}"
+            and env.get("KIND") == "${{ github.event.inputs.kind }}"
+            and env.get("HEAD_SHA") == "${{ github.event.inputs.head_sha }}"
+            and env.get("REVISION_INPUT") == "${{ github.event.inputs.revision }}",
+        )
+        check(
+            "workflow: no-source fallback uses only the card token",
+            env.get("GH_TOKEN") == "${{ github.token }}"
+            and "FLEET_TOKEN" not in yaml.safe_dump(fallback),
+        )
+        check(
+            "workflow: no-source fallback clears queued cache for retry",
+            "triaged_sha" in run
+            and "triage_status" in run
+            and "gh issue edit" in run
+            and "future scan can retry" in run,
+        )
     recover_i = step_index(
         steps,
         lambda s: s.get("name")
@@ -1817,6 +1860,35 @@ def test_triage_workflow_security_wiring():
     check(
         "workflow: recovery step runs after the update step",
         None not in (update_i, recover_i) and update_i < recover_i,
+    )
+
+
+def test_render_card_recovery_import_does_not_require_pyyaml():
+    code = r'''
+import importlib.abc
+import os
+import sys
+
+class BlockYaml(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "yaml" or fullname.startswith("yaml."):
+            raise ImportError("blocked yaml")
+        return None
+
+sys.meta_path.insert(0, BlockYaml())
+sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+import render_card
+print(render_card.HOLD_LABEL)
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    check(
+        "recovery: render_card imports without PyYAML installed",
+        result.returncode == 0 and result.stdout.strip() == rc.HOLD_LABEL,
     )
 
 
@@ -2486,6 +2558,7 @@ def main():
     test_update_card_triage_stale_revision_is_noop_for_held_card()
     test_update_card_triage_unheld_card_behavior_unchanged()
     test_reconcile_self_heals_close_held_card_whose_target_closed()
+    test_render_card_recovery_import_does_not_require_pyyaml()
     test_triage_recover_cli_publishes_a_stuck_held_card()
     test_triage_recover_cli_is_noop_when_not_stuck()
     print()

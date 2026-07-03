@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 try:
     import yaml
 except ImportError:  # pragma: no cover - workflows `pip install pyyaml` first
-    sys.exit("PyYAML is required (pip install pyyaml)")
+    yaml = None
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -188,6 +188,8 @@ def config_path():
 
 
 def load_config():
+    if yaml is None:
+        sys.exit("PyYAML is required (pip install pyyaml)")
     with open(config_path()) as f:
         cfg = yaml.safe_load(f) or {}
     repos = cfg.get("repos") or []
@@ -1686,6 +1688,8 @@ def repo_pr_target_posture(slug):
         pwn-request supply-chain pattern) - flagged loudly, best-effort.
       * error     - a read/parse failure tripped the fail-closed path.
     Fails CLOSED: any unread/unparseable workflow makes pr_target True."""
+    if yaml is None:
+        return {"pr_target": True, "exploit": False, "error": True}
     paths, status = _list_workflow_files(slug)
     if status == "error":
         return {"pr_target": True, "exploit": False, "error": True}

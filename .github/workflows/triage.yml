@@ -76,18 +76,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Install deps
-        run: pip install --quiet pyyaml
-
       - id: trusted-src
         run: |
           set -euo pipefail
           trusted="${RUNNER_TEMP}/wheelhouse-trusted-src"
-          python_path="$(command -v python)"
+          python_path="$(command -v python3 || command -v python)"
           gh_path="$(command -v gh)"
           safe_path="$(dirname "$python_path"):$(dirname "$gh_path"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           rm -rf "$trusted"
@@ -100,6 +93,13 @@ jobs:
             echo "python=$python_path"
             echo "safe_path=$safe_path"
           } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
 
       - id: gate
         env:
@@ -571,3 +571,103 @@ jobs:
               --kind "$KIND" \
               --revision "$REVISION" \
               --message "$RECOVER_MESSAGE"
+
+      - name: Clear queued triage cache if trusted source is unavailable
+        if: always() && steps.trusted-src.outputs.path == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.inputs.issue }}
+          KIND: ${{ github.event.inputs.kind }}
+          HEAD_SHA: ${{ github.event.inputs.head_sha }}
+          REVISION_INPUT: ${{ github.event.inputs.revision }}
+          GH_REPO: ${{ github.repository }}
+          GH_PROMPT_DISABLED: "1"
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          PYTHONHOME: ""
+          PYTHONPATH: ""
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$ISSUE" | grep -Eq '^[0-9]+$'; then
+            echo "recover: no valid issue number in the dispatch inputs, nothing to clear"
+            exit 0
+          fi
+          if [ "$KIND" = "issue-triage" ]; then
+            REVISION="$REVISION_INPUT"
+          elif [ "$KIND" = "pr-review" ]; then
+            REVISION="$HEAD_SHA"
+          else
+            echo "recover: no supported kind in the dispatch inputs, nothing to clear"
+            exit 0
+          fi
+          if [ -z "$REVISION" ]; then
+            echo "recover: no revision in the dispatch inputs, nothing to clear"
+            exit 0
+          fi
+          export REVISION
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          card_json="$tmp/card.json"
+          body_file="$tmp/body.md"
+          gh issue view "$ISSUE" --json body,labels,state > "$card_json"
+          python3 - "$card_json" "$body_file" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          state_re = re.compile(r"<!--\s*(?:wheelhouse|triage)-state:\s*(\{.*?\})\s*-->", re.S)
+          triage_re = re.compile(
+              r"\n?<!--\s*wheelhouse-triage:start\s*-->.*?"
+              r"<!--\s*wheelhouse-triage:end\s*-->\n?",
+              re.S,
+          )
+          doc = json.load(open(sys.argv[1]))
+          if str(doc.get("state", "OPEN")).upper() != "OPEN":
+              sys.exit(0)
+          labels = {
+              label if isinstance(label, str) else label.get("name", "")
+              for label in (doc.get("labels") or [])
+          }
+          if "needs-decision" not in labels or labels.intersection({"processing", "resolved", "blocked"}):
+              sys.exit(0)
+          body = doc.get("body") or ""
+          match = state_re.search(body)
+          if not match:
+              sys.exit(0)
+          try:
+              state = json.loads(match.group(1))
+          except (TypeError, ValueError):
+              sys.exit(0)
+          revision = os.environ.get("REVISION", "")
+          if (
+              not revision
+              or state.get("kind") != os.environ.get("KIND")
+              or state.get("triaged_sha") != revision
+              or state.get("triage_status") != "queued"
+          ):
+              sys.exit(0)
+          new_state = dict(state)
+          for key in ("triaged_sha", "triage_status", "triage_error"):
+              new_state.pop(key, None)
+          clean = triage_re.sub("\n", body).strip() + "\n"
+          marker = "<!-- wheelhouse-state: %s -->" % json.dumps(
+              new_state,
+              separators=(",", ":"),
+          )
+          new_body, count = state_re.subn(marker, clean, count=1)
+          if count == 0:
+              new_body = clean.rstrip() + "\n\n" + marker
+          if new_body != body:
+              with open(sys.argv[2], "w") as f:
+                  f.write(new_body)
+          PY
+          if [ -s "$body_file" ]; then
+            gh issue edit "$ISSUE" --body-file "$body_file"
+            echo "recover: cleared queued triage cache so a future scan can retry"
+          else
+            echo "recover: queued triage cache is not stale for these inputs"
+          fi
