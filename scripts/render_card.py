@@ -266,6 +266,18 @@ def render_stale(state):
     return stored_version < CARD_RENDER_VERSION
 
 
+def held_publish_needed(item, state, has_token):
+    return bool((state or {}).get("held")) and not should_hold(item, has_token)
+
+
+def refresh_needed(item, state, has_token=False):
+    return (
+        material_changed(item, state)
+        or render_stale(state)
+        or held_publish_needed(item, state, has_token)
+    )
+
+
 # Auto-triage caches against a per-kind revision: a PR's `head_sha`, or an
 # issue's `updatedAt` (issues have no head SHA, and `updatedAt` advances on any
 # edit or new comment). For PRs, `head_sha` is also a material refresh field; for
@@ -1072,10 +1084,11 @@ def upsert_card(item, existing=None, has_token=False):
         )
         return number
     old_state = parse_state_block(existing.get("body", ""))
-    if not material_changed(item, old_state) and not render_stale(old_state):
+    publish_held = held_publish_needed(item, old_state, has_token)
+    if not refresh_needed(item, old_state, has_token):
         print("skip card #%s for %s: no material change" % (number, marker))
         return number
-    held = bool((old_state or {}).get("held")) and should_hold(item, has_token)
+    held = bool((old_state or {}).get("held")) and not publish_held
     card = render(item, held=held)
     ensure_labels(card["labels"])
     return _refresh_card(number, card, existing, item, old_state)

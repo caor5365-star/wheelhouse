@@ -150,10 +150,11 @@ def main():
     worklist_keys = {(item["repo"], int(item["number"])) for item in items}
 
     # 1) For each scanned worklist item, create a card if none exists, else
-    #    refresh it in place when its target materially changed or its card
-    #    render_version is stale. Items only come from ok:true repos (build_repo
-    #    returns no items for a failed scan), so this path never refreshes a card
-    #    for a repo whose state is unknown.
+    #    refresh it in place when its target materially changed, its card
+    #    render_version is stale, or a held card should now be published. Items
+    #    only come from ok:true repos (build_repo returns no items for a failed
+    #    scan), so this path never refreshes a card for a repo whose state is
+    #    unknown.
     created = 0
     refreshed = 0
     triage_queued = 0
@@ -189,16 +190,12 @@ def main():
                 triage_queued += 1
             continue
         # Card exists: refresh only a pure needs-decision card whose target
-        # materially changed OR whose stored render_version is behind current
-        # (a one-time, self-terminating re-render for display/card-body fixes,
-        # e.g. dropping the author @mention or re-qualifying cached triage refs).
-        # A card mid-decision
-        # (processing/resolved/blocked) or with neither trigger is left
-        # completely untouched (no edit, no comment). `upsert_card` re-checks
-        # both guards before it edits.
-        if render_card.is_refreshable(ex["labels"]) and (
-            render_card.material_changed(item, ex["state"])
-            or render_card.render_stale(ex["state"])
+        # materially changed, whose stored render_version is behind current,
+        # or whose held state no longer has a completion path. A card
+        # mid-decision (processing/resolved/blocked) or with no trigger is left
+        # completely untouched. `upsert_card` re-checks both guards before it edits.
+        if render_card.is_refreshable(ex["labels"]) and render_card.refresh_needed(
+            item, ex["state"], has_triage_token
         ):
             try:
                 current = current_card(ex)
@@ -206,9 +203,9 @@ def main():
                 if current is not None and render_card.is_refreshable(
                     current["labels"]
                 ):
-                    still_stale = render_card.material_changed(
-                        item, current["state"]
-                    ) or render_card.render_stale(current["state"])
+                    still_stale = render_card.refresh_needed(
+                        item, current["state"], has_triage_token
+                    )
                     if still_stale:
                         render_card.upsert_card(
                             item, existing=current, has_token=has_triage_token

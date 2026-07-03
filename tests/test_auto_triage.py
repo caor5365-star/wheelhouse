@@ -2395,19 +2395,19 @@ def test_upsert_card_refresh_publishes_held_when_hold_gate_turns_off():
         (
             "pr auto-triage config disabled",
             item(auto_triage=True, head_sha="oldsha"),
-            item(auto_triage=False, head_sha="newsha999"),
+            item(auto_triage=False, head_sha="oldsha"),
             True,
         ),
         (
             "issue auto-triage config disabled",
             item_issue(auto_triage_issues=True, priority="low"),
-            item_issue(auto_triage_issues=False, priority="high"),
+            item_issue(auto_triage_issues=False, priority="low"),
             True,
         ),
         (
             "token absent",
             item(auto_triage=True, head_sha="oldsha"),
-            item(auto_triage=True, head_sha="newsha999"),
+            item(auto_triage=True, head_sha="oldsha"),
             False,
         ),
     ]
@@ -2448,22 +2448,41 @@ def test_reconcile_refresh_preserves_held_when_still_eligible():
 
 
 def test_reconcile_refresh_publishes_held_when_hold_gate_turns_off():
-    old = item(head_sha="oldsha", auto_triage=True)
-    new = item(head_sha="newsha999", auto_triage=False)
-    calls = _run_reconcile_real_upsert_refresh(old, new, token="true")
-    body = calls["card"]["body"]
-    state = core.parse_state_block(body)
-    label_names = {label["name"] for label in calls["card"]["labels"]}
-    check("reconcile: ineligible held card clears held", "held" not in state)
-    check("reconcile: ineligible held card restores checkboxes", "<!-- opt:" in body)
-    check(
-        "reconcile: ineligible held card removes pending label",
-        rc.HOLD_LABEL not in label_names,
-    )
-    check(
-        "reconcile: ineligible held card has no triage section",
-        rc.TRIAGE_START not in body,
-    )
+    scenarios = [
+        (
+            "config disabled",
+            item(head_sha="oldsha", auto_triage=True),
+            item(head_sha="oldsha", auto_triage=False),
+            "true",
+        ),
+        (
+            "token absent",
+            item(head_sha="oldsha", auto_triage=True),
+            item(head_sha="oldsha", auto_triage=True),
+            "",
+        ),
+    ]
+    for label, old, new, token in scenarios:
+        calls = _run_reconcile_real_upsert_refresh(old, new, token=token)
+        body = calls["card"]["body"]
+        state = core.parse_state_block(body)
+        label_names = {label["name"] for label in calls["card"]["labels"]}
+        check(
+            "reconcile(%s): ineligible held card clears held" % label,
+            "held" not in state,
+        )
+        check(
+            "reconcile(%s): ineligible held card restores checkboxes" % label,
+            "<!-- opt:" in body,
+        )
+        check(
+            "reconcile(%s): ineligible held card removes pending label" % label,
+            rc.HOLD_LABEL not in label_names,
+        )
+        check(
+            "reconcile(%s): ineligible held card has no triage section" % label,
+            rc.TRIAGE_START not in body,
+        )
 
 
 def test_upsert_card_held_no_churn_when_unchanged():
@@ -2477,7 +2496,7 @@ def test_upsert_card_held_no_churn_when_unchanged():
     old_get_card = rc.get_card
     rc.get_card = lambda number: existing if int(number) == 7 else None
     try:
-        result = rc.upsert_card(it, existing=existing)
+        result = rc.upsert_card(it, existing=existing, has_token=True)
     finally:
         rc.get_card = old_get_card
     check("held: unchanged held card is a full no-op", result == 7)
