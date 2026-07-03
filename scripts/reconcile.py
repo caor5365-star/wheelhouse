@@ -63,16 +63,25 @@ def current_card(row):
     }
 
 
-def auto_triage_has_token():
-    return os.environ.get("WHEELHOUSE_AUTO_TRIAGE_HAS_TOKEN", "").lower() == "true"
+# Kept as a thin alias: reconcile.py historically owned this check, and
+# render_card.py now needs the same signal (to decide whether a brand-new
+# card is created HELD), so it is the shared single source of truth.
+auto_triage_has_token = render_card.auto_triage_has_token
 
 
-def maybe_queue_auto_triage(item, row, has_token):
+def maybe_queue_auto_triage(item, row, has_token, owner=""):
     """Queue lightweight advisory triage when this card revision lacks a cache.
 
     The card is marked queued before dispatch so a failed workflow still counts
     as this revision's one attempt. Only pure needs-decision pr-review and
     issue-triage cards qualify.
+
+    If the workflow dispatch itself fails (the queued-cache write already
+    landed, so a later scan would never retry this revision - see
+    `render_card.mark_triage_queued`), a HELD card is published immediately
+    with a note instead of being left held indefinitely: fail-open (see
+    AGENTS.md "Held cards") must not depend on a dispatch that never actually
+    started.
     """
     if not row:
         return False
@@ -80,21 +89,39 @@ def maybe_queue_auto_triage(item, row, has_token):
         item, row.get("state"), row.get("labels"), has_token
     ):
         return False
+    revision = render_card.triage_revision(item)
     try:
         if not render_card.mark_triage_queued(row["number"], item, row.get("body", "")):
             return False
-        render_card.dispatch_triage_workflow(row["number"], item)
-        print(
-            "queued auto triage for %s#%s on card #%s"
-            % (item["repo"], item["number"], row["number"])
-        )
-        return True
     except Exception as e:
         print(
             "::warning::failed to queue auto triage for card #%s (%s#%s): %s"
             % (row.get("number"), item.get("repo"), item.get("number"), str(e)[:160])
         )
         return False
+    try:
+        render_card.dispatch_triage_workflow(row["number"], item)
+    except Exception as e:
+        print(
+            "::warning::failed to dispatch auto triage for card #%s (%s#%s): %s "
+            "- publishing the card so it is not left held indefinitely"
+            % (row.get("number"), item.get("repo"), item.get("number"), str(e)[:160])
+        )
+        try:
+            render_card.update_card_triage(
+                row["number"],
+                revision,
+                error="Auto triage could not be started: %s" % str(e)[:160],
+                owner=owner,
+            )
+        except Exception:
+            pass
+        return False
+    print(
+        "queued auto triage for %s#%s on card #%s"
+        % (item["repo"], item["number"], row["number"])
+    )
+    return True
 
 
 def main():
@@ -134,6 +161,7 @@ def main():
     refreshed = 0
     triage_queued = 0
     has_triage_token = auto_triage_has_token()
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
     for item in items:
         key = (item["repo"], int(item["number"]))
         ex = existing.get(key)
@@ -145,7 +173,10 @@ def main():
                 # that listing is not read-after-write consistent right after
                 # `gh issue create`, so it would silently miss the card just
                 # created and skip queuing its first auto-triage attempt.
-                number = render_card.upsert_card(item)
+                # `has_token` also decides whether an eligible new card is
+                # created HELD (see AGENTS.md "Held cards") - the same signal
+                # that gates whether triage below actually gets queued.
+                number = render_card.upsert_card(item, has_token=has_triage_token)
                 created += 1
                 current_for_triage = (
                     current_card({"number": number}) if number else None
@@ -155,7 +186,9 @@ def main():
                     "::warning::failed to create card for %s#%s: %s"
                     % (item["repo"], item["number"], str(e)[:160])
                 )
-            if maybe_queue_auto_triage(item, current_for_triage, has_triage_token):
+            if maybe_queue_auto_triage(
+                item, current_for_triage, has_triage_token, owner=owner
+            ):
                 triage_queued += 1
             continue
         # Card exists: refresh only a pure needs-decision card whose target
@@ -192,7 +225,9 @@ def main():
             item, ex["state"], ex["labels"], has_triage_token
         ):
             current_for_triage = current_card(ex)
-        if maybe_queue_auto_triage(item, current_for_triage, has_triage_token):
+        if maybe_queue_auto_triage(
+            item, current_for_triage, has_triage_token, owner=owner
+        ):
             triage_queued += 1
 
     # 2) Close cards whose target is no longer open, and pure pending cards whose

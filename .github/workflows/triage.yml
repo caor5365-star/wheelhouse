@@ -507,3 +507,61 @@ jobs:
                 --revision "$REVISION" \
                 --execution-file "${TRIAGE_EXECUTION_FILE:-}"
           fi
+
+      # Fail-open safety net (see AGENTS.md "Held cards"): if `resolve` itself
+      # failed before writing its outputs (e.g. a transient `gh issue view`
+      # error), the step above ran with an EMPTY issue/revision and silently
+      # did nothing - a held card's `triaged_sha` is already cached for this
+      # revision, so no future scan would ever retry it. This step always
+      # runs off the RAW workflow_dispatch inputs (never `steps.resolve`
+      # outputs) and grounds against the card's actual current state, so it
+      # is a no-op unless the card is genuinely still held and queued for
+      # exactly this revision.
+      - name: Recover a held card if this run never reached the update step
+        if: always() && steps.gate.outputs.enabled == 'true'
+        working-directory: ${{ steps.trusted-src.outputs.path }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.inputs.issue }}
+          KIND: ${{ github.event.inputs.kind }}
+          HEAD_SHA: ${{ github.event.inputs.head_sha }}
+          REVISION_INPUT: ${{ github.event.inputs.revision }}
+          TRUSTED_PYTHON: ${{ steps.trusted-src.outputs.python }}
+          TRUSTED_PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          TRUSTED_HOME: ${{ runner.temp }}/wheelhouse-gh-home
+          GH_REPO: ${{ github.repository }}
+          GH_PROMPT_DISABLED: "1"
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          PATH: ${{ steps.trusted-src.outputs.safe_path }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          PYTHONHOME: ""
+          PYTHONPATH: ""
+        run: |
+          set -euo pipefail
+          mkdir -p "$TRUSTED_HOME"
+          if ! printf '%s' "$ISSUE" | grep -Eq '^[0-9]+$'; then
+            echo "recover: no valid issue number in the dispatch inputs, nothing to recover"
+            exit 0
+          fi
+          if [ "$KIND" = "issue-triage" ]; then
+            REVISION="$REVISION_INPUT"
+          else
+            REVISION="$HEAD_SHA"
+          fi
+          export REVISION
+          env -i \
+            PATH="$TRUSTED_PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONNOUSERSITE=1 \
+            HOME="$TRUSTED_HOME" \
+            GH_TOKEN="$GH_TOKEN" \
+            GH_REPO="$GH_REPO" \
+            GH_PROMPT_DISABLED="$GH_PROMPT_DISABLED" \
+            GITHUB_REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER" \
+            "$TRUSTED_PYTHON" scripts/render_card.py triage-recover \
+              --issue "$ISSUE" \
+              --kind "$KIND" \
+              --revision "$REVISION"

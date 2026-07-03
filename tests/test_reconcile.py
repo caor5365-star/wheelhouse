@@ -81,8 +81,10 @@ def run_reconcile(scan, cards, current_cards=None):
         c["number"]: c for c in (cards if current_cards is None else current_cards)
     }
 
-    def fake_upsert(item, existing=None):
-        calls["upsert"].append({"item": item, "existing": existing})
+    def fake_upsert(item, existing=None, has_token=False):
+        calls["upsert"].append(
+            {"item": item, "existing": existing, "has_token": has_token}
+        )
 
     def fake_close(number, message, label="resolved"):
         calls["close"].append({"number": number, "message": message, "label": label})

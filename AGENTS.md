@@ -221,7 +221,7 @@ still appears where it's plain English, e.g. "triage the queue".)
   current **revision** - a pr-review item's `head_sha`, or an issue-triage
   item's `updated_at` (issues have no head SHA, so their GraphQL `updatedAt`
   is the freshness key instead; it advances on any edit or new comment).
-  `render_card._triage_revision(item)` / `render_card.state_revision(state,
+  `render_card.triage_revision(item)` / `render_card.state_revision(state,
   kind)` are the single pair of helpers that pick the right field for a kind;
   every triage cache function (`triage_fresh`, `should_auto_triage`,
   `body_with_triage_queued`, `body_with_triage_result`,
@@ -267,6 +267,62 @@ still appears where it's plain English, e.g. "triage the queue".)
   gate/Claude/card-update steps, security posture, and `--revision` CLI
   argument (`render_card.py triage-apply|triage-fail --revision <head_sha or
   updated_at>`).
+- **Held cards - a card is not owner-visible in its normal form until its
+  first auto-triage attempt completes.** When `should_hold` says a brand-new
+  pr-review/issue-triage card would have triage queued for it (same gate as
+  auto triage itself: the per-kind flag AND `CLAUDE_CODE_OAUTH_TOKEN`), the
+  card is created HELD instead of in its normal form: `needs-decision` STAYS
+  (triage.yml's resolve step requires a pure, refreshable `needs-decision`
+  card or it never runs), the `pending-triage` label (`HOLD_LABEL`) is added
+  on top, and the body's "Your decision" section is a placeholder with no
+  checkboxes - no `<!-- opt:* -->` markers, so it is naturally inert to the
+  decision handler's checkbox/slash-command parsing; `apply_decision.py
+  cmd_parse`/`cmd_nl_eligible` also short-circuit on the state block's
+  `held` flag as defense in depth. `held` is a non-material state key (like
+  `triaged_sha`) - never in `MATERIAL_FIELDS`, never affecting
+  classify/material_changed/decision-parsing/merge-close-approve/
+  fork-CI-safety/author-filtering/conflict-routing.
+  A held card is **published** - real checkboxes appear, `pending-triage` is
+  removed - the moment its own auto-triage ATTEMPT completes, in the SAME
+  `update_card_triage` call `triage-apply`/`triage-fail` already use: this is
+  gated on the attempt COMPLETING, never on it SUCCEEDING, so a held card can
+  never stay hidden because triage errored, timed out, or (a fail-open
+  hardening beyond the original ask) even failed to DISPATCH -
+  `reconcile.py`'s `maybe_queue_auto_triage` and the `queue-triage` CLI both
+  now publish a held card immediately with a "could not be started" note if
+  `dispatch_triage_workflow` itself throws, since the queued-cache write
+  already landed and a later scan would never retry that revision otherwise.
+  Publishing is keyed to the card's own CURRENT revision
+  (`state_revision`/`triage_revision`): a stale attempt whose revision no
+  longer matches (the card was refreshed to a newer revision while the
+  attempt was in flight) is a no-op, because that refresh already queued a
+  fresh attempt for the new revision which will publish the card itself -
+  exactly mirroring how a stale triage result is already dropped for a
+  published card. A refresh NEVER decides held-ness itself: `upsert_card`
+  reads whatever held-ness the card's OWN stored state already carries
+  (`old_state.get("held")`) and simply re-renders the placeholder with the
+  fresh material state, so a held card stays held across ordinary refreshes
+  and only `update_card_triage` ever flips it to published - this is what
+  keeps a held card's self-heal-close (its target left the worklist, or
+  merged/closed) working through the SAME existing reconcile logic with no
+  held-specific branching, since a held card is `is_refreshable` exactly like
+  any other pure pending card. Config off or no token: a brand-new eligible
+  card is created in its normal form immediately, exactly as before this
+  feature - never held.
+  **Fail-open safety net for a `triage.yml` run that never reaches its
+  update step at all** (e.g. `resolve` itself throws on a transient `gh
+  issue view` error before writing its outputs, which would otherwise leave
+  the update step running with an EMPTY issue/revision and silently doing
+  nothing - `triaged_sha` is already cached for that revision, so no future
+  scan would ever retry it and the card would stay held forever): a final
+  `always()` step runs `render_card.py triage-recover --issue --kind
+  --revision`, sourced from the RAW `workflow_dispatch` inputs (never
+  `steps.resolve.outputs`, which may be empty). It grounds against the
+  card's actual CURRENT state and is a no-op unless the card is genuinely
+  still held with `triage_status: queued` for exactly that revision -
+  publishing it with a generic "did not finish" note only in that exact
+  stuck case, so it can never double-write over a result the normal update
+  step already recorded, whether that result was a success or a `triage-fail`.
 - Natural-language decisions are owner-comment-only and structured: the LLM
   returns `{mode: action|answer|clarify, action?, free_text?, answer?}` to
   `decision.json` and nothing else. `apply_decision.py nl-route` is the trust
@@ -594,14 +650,14 @@ It is best-effort by construction (`_thank_contributor` swallows every exception
 No build step.
 Validate with `python -m py_compile scripts/*.py tests/*.py`.
 Run the unit tests:
-- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), and that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text.
+- `python tests/test_decision.py` - mocks the LLM, no network, and also covers the non-consuming investigate routing, allow-set, `clear_checkbox`, the `thank_on_merge` post-merge thank-you (config on/off, per-repo override, owner/maintainer/bot skip, custom-message substitution, best-effort swallow, and every non-success merge outcome posting none), that `route_decision` qualifies bare cross-repo refs in `answer`/`clarify` replies using `STATE["repo"]` + owner, never the model's own text, and that a HELD card (render_card.py "Held cards") is inert to `cmd_parse` (checkbox tick and slash-command alike) and `cmd_nl_eligible`, while the identical card once published is actionable again.
 - `python tests/test_nl_decisions_search.py` - offline YAML wiring checks for the optional READONLY_TOKEN search path, scoped actor-check bypass, token isolation, prompt gating, unchanged `nl-route`/`execute` boundary, the `GITHUB_REPOSITORY_OWNER` threading into the `route` step's `env -i` sandbox, the NL prompt's cross-repo-qualification instruction, and that `route_decision` qualification is driven by deterministic state rather than model-claimed repos.
 - `python tests/test_card_refresh.py` - the card-refresh change-detection, refreshability-guard, and label-replace logic, pure functions, no network; also covers the `CARD_RENDER_VERSION` 1 -> 2 retroactive triage-ref-qualification propagation: a render-version-behind card with a bare-ref cached `### Triage` section gets it qualified and stamped `render_version=2` on the next refresh, a card already at `render_version=2` with already-qualified triage is a full no-op, already-qualified refs/URLs/markdown links/non-ref `#` uses in the preserved section are left untouched, and qualification is driven by `GITHUB_REPOSITORY_OWNER` + the card's own state repo rather than the item or model text.
 - `python tests/test_reconcile.py` - reconcile routing and stale-card self-healing, no network.
 - `python tests/test_merge_conflict.py` - mergeability fail-open vs CONFLICTING routing, idempotent rebase nudges, author-filter nudge skips, and reconcile self-healing for conflicted PR cards, no network.
 - `python tests/test_ci_autoapprove.py` - the shared `ci_safety` verdict, `pull_request_target` posture detection, and the auto-approve-vs-card routing plus scan-log observability in `build_repo`, all with the network-touching helpers stubbed.
 - `python tests/test_author_filter.py` - queue author filtering across PR review, CI approval, and issue triage, plus open-issue/PR/closing-reference pagination guards, no network.
-- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline.
+- `python tests/test_auto_triage.py` - automatic PR-card AND issue-card triage: `auto_triage`/`auto_triage_issues` config defaults/overrides/independence, per-revision (`head_sha`/`updated_at`) cache and legacy-card backfill for both kinds, rendered section/no-mention behavior for both kinds, reconcile/ingest dispatch gates including same-pass newly-created-card queueing by issue number, `triage.yml` token isolation including the issue-triage default-branch/no-head-verify path, and cross-repo ref qualification in the rendered `### Triage` section (`triage_section`/`body_with_triage_result` owner threading, the `triage.yml` prompt's qualification instruction, and `GITHUB_REPOSITORY_OWNER` reaching both `triage-apply`/`triage-fail` through the `env -i` sandbox), all offline. Also covers held cards for both kinds: `should_hold` gating parity with `should_auto_triage`, the placeholder render (no `opt:` markers, `pending-triage` label, `held` state key, `needs-decision` retained), `upsert_card` creating held only when triage would actually be queued and preserving held-ness (not re-deciding it) across a material refresh, a no-op refresh when unchanged, `update_card_triage` publishing on success AND on failure (fail-open), a stale-revision publish attempt being a no-op, unheld-card behavior staying byte-for-byte unchanged, reconcile self-healing a held card whose target closed, the dispatch-failure fail-open publish added to both `reconcile.py` and the `queue-triage` CLI, and the `triage-recover` fail-open safety net (`triage.yml`'s final `always()` recovery step wiring, and the CLI publishing a card genuinely stuck held+queued for its exact revision while being a no-op for a never-held card, an already-published card, or one queued for a different/superseded revision).
 - `python tests/test_deep_review.py` - the always-on/code-grounded deep-review and Investigate wiring: render options, the removed enable flag, the token-absent note, the `persist-credentials: false` checkout plus read-only tool isolation, the narrow `allowed_bots`, the optional READONLY_TOKEN-gated `wheelhouse-search` wiring, the action-output verdict capture, issue-only manual dispatch, the handler's immutable-input `workflow_dispatch` trigger, and the "Post the verdict" step's `qualify_issue_refs` call (with the deterministic `TARGET_REPO`/`GITHUB_REPOSITORY_OWNER` inputs) running before the `gh issue comment` post, plus the prompt's qualification instruction, all by inspecting the scripts/YAML, no network.
 - `python tests/test_workflow_lint.py` - a regression guard that scans every `.github/workflows/*.yml` `run:` step for a `gh api` invocation combining `--slurp` with `--jq` (mutually exclusive in the installed `gh` CLI - `gh api --slurp` yields an array of per-page arrays and must instead be piped into a standalone `jq`), no network.
 - `python tests/test_qualify_refs.py` - direct unit tests for `wheelhouse_core.qualify_issue_refs` (bare `#N` -> `owner/repo#N`, already-qualified/URL/markdown-link/`GH-123`/`#123abc` left untouched, multiple refs in one string, `None`/empty safety, idempotency, and that qualification is driven by the caller-supplied slug rather than any repo the text itself names), no network.
