@@ -19,7 +19,8 @@ event path (`render_card.upsert_card`) and the backstop (`reconcile.py`) rely on
   * the label replace - `plan_label_update` removes stale wheelhouse-managed
     labels (`repo:`/`kind:`/`priority:`/`target:`) while keeping
     `needs-decision` and any human-added label, and is a no-op when nothing
-    changed;
+    changed. Held-card tests cover the same helper's exact `pending-triage`
+    label sync;
   * the state block now carries the material fields and round-trips, so the
     change check is cheap and deterministic.
 """

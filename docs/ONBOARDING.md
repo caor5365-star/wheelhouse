@@ -3,11 +3,12 @@
 The scheduled `scan-backstop` already finds and refreshes items in your fleet hourly with **no** changes to your other repos.
 This doc is the optional **fast path**: add a tiny dispatch workflow to a source repo so events show up or refresh in your queue in real time instead of waiting for the next hourly scan.
 
-Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card or refreshes a pure pending card when material state has changed or when Wheelhouse's internal card render version is stale; the backstop still reconciles everything later.
+Nothing here is required to run the machine, and nothing here changes how Wheelhouse classifies items - a dispatch is just a low-latency nudge that creates a card or refreshes a pure pending card when material state has changed, when Wheelhouse's internal card render version is stale, or when a held card should be published because auto triage is no longer eligible; the backstop still reconciles everything later.
 The scheduled scan applies Wheelhouse's owner/maintainer/bot author filter, but this explicit dispatch path trusts the source workflow and does not re-check author type, so only dispatch items you want carded.
 The scheduled scan also applies merge-conflict `needs-rebase` routing and rebase nudges; explicit dispatches do not, so the backstop may later consume a dispatched PR-review card for a PR GitHub reports as `CONFLICTING`.
 For PR-review and issue-triage cards, ingest can also queue the automatic lightweight triage side job after the upsert step, using the same config and token gates as the scheduled scan.
 That includes a newly created card: the hub threads the issue number from the upsert step into the queueing step and reads the card back by number, so the first eligible triage attempt is queued in the same run.
+When that first attempt will run, the newly created card starts with a `pending-triage` placeholder and no decision checkboxes, then publishes the normal boxes once the attempt succeeds, fails, or cannot be started.
 For issue-triage, a new `updated_at` can queue a fresh attempt even when no full card refresh is needed.
 
 > You add these files to **your source repos**, not to Wheelhouse.
@@ -48,14 +49,18 @@ Since issues have no head SHA, pass `updated_at` on an `issue-triage` dispatch (
 Default checkbox sets are `pr-review`: `merge,close,investigate,hold`; `ci-approval`: `approve-ci,close,hold`; and `issue-triage`: `close,investigate,hold`.
 `investigate` is non-consuming: it triggers the code-grounded deep-review workflow, clears the box, and leaves the card open for the real decision.
 If you override `options`, include `investigate` only on `pr-review` or `issue-triage` cards when you want that box.
+A held `pending-triage` card still stores the same options in its hidden state, but it does not render checkbox lines until auto triage publishes it.
 
 The hub's `ingest` workflow dedupes by target: a second dispatch for the same `repo`+`number` creates nothing new.
-If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or `options`) or its stored card render version is stale, the hub refreshes it in place.
+If the existing card is still a pure `needs-decision` card and a material field changed (`head_sha`, `comp`, `tests`, `kind`, `priority`, or `options`), its stored card render version is stale, or a held card should be published because auto triage is no longer eligible, the hub refreshes it in place.
+`pending-triage` cards still count as refreshable because they retain `needs-decision`; refresh preserves the placeholder while auto triage remains eligible, or publishes the normal boxes if that eligibility turns off.
 The render-version trigger is internal and self-terminating; source repos do not send it.
 A stale render version can also apply internal card-body repairs, such as qualifying bare target refs preserved in older cached `Triage` sections.
 Title, summary, and recommendation updates ride along with a material or render-version refresh, but do not rewrite an existing card by themselves.
 Cards already labeled `processing`, `resolved`, or `blocked` are left untouched so a refresh cannot clobber an in-flight or consumed decision.
 When auto triage is eligible, the hub writes `triaged_sha` for the current revision before dispatching `triage.yml`, so a failed or timed-out run is still the only attempt for that PR head SHA or issue `updatedAt`.
+For a held card, any completed attempt publishes the decision boxes fail-open; if workflow dispatch itself fails after the cache write, the hub publishes the card immediately with an unavailable note.
+If `triage.yml` fails before its update step, its final recovery step publishes a genuinely stuck held card for that exact revision, or clears the queued cache when trusted source setup was unavailable so a later scan can retry.
 For a newly created card, that queueing happens in the same ingest run, not only on the later hourly scan.
 
 > **Legacy event type.** Before the rename to Wheelhouse the event type was `triage-item`. `ingest.yml` still listens for both (`types: [wheelhouse-item, triage-item]`), so a source repo wired up before the rename keeps working - but new dispatchers should send `wheelhouse-item`.
@@ -145,6 +150,7 @@ You can exercise the whole path without touching a source repo:
 1. In the hub, **Actions** ▸ **ingest** ▸ **Run workflow**.
 2. Fill in `repo`, `number`, and (recommended) `head_sha` for a PR-review card or `updated_at` for an issue-triage card.
 3. A decision card appears in the hub's issues; if one already exists, material changes or a stale card render version refresh it in place.
+   If auto triage is eligible, it may first appear with `pending-triage` and no decision boxes; wait for the triage result or unavailable note to publish it.
 4. Tick a consuming decision box to confirm the handler acts on the target.
 
 This is the quickest way to validate `FLEET_TOKEN` scope before wiring real dispatches.

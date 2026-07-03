@@ -10,11 +10,14 @@ fleet (scan.json) and the current open cards in THIS repo (cards.json), it:
     `upsert_card`, and queues its first eligible auto-triage attempt in the same
     pass,
   * refreshes an OPEN `needs-decision` card in place when its target's material
-    state changed (head_sha/compliance/tests/kind/priority/options) - so the queue
-    reflects current state, not just the snapshot taken when the card was first
-    created - and leaves materially-unchanged cards completely untouched, and
+    state changed (head_sha/compliance/tests/kind/priority/options), when its
+    render version is stale, or when a held card should be published because
+    auto triage is no longer eligible - so the queue reflects current state,
+    not just the snapshot taken when the card was first created; cards with
+    none of those triggers are left completely untouched, and
   * queues lightweight automatic triage for eligible pure pending pr-review or
-    issue-triage cards whose current revision lacks a `triaged_sha` cache, and
+    issue-triage cards whose current revision lacks a `triaged_sha` cache
+    (`pending-triage` held cards still count as pure pending), and
   * closes any open card whose underlying PR/issue is no longer open, and closes
     pure pending cards whose open target no longer needs a maintainer decision -
     so the queue self-heals even if a dispatch was lost.

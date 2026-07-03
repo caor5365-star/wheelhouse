@@ -10,6 +10,10 @@ name: triage
 # most one attempt. `auto_triage` gates pr-review cards; the INDEPENDENT
 # `auto_triage_issues` gates issue-triage cards - each can be toggled off
 # without affecting the other.
+# If the card is held under `pending-triage`, this workflow publishes its real
+# decision checkboxes in the same update step that records success or failure,
+# and its final recovery step fail-opens a held card whose run never reached
+# that update step.
 #
 # For a pr-review card this checks out the PR head and verifies it did not move.
 # For an issue-triage card there is no head to verify - it checks out the

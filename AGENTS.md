@@ -32,8 +32,8 @@ still appears where it's plain English, e.g. "triage the queue".)
 ## Architecture
 
 - **State lives in GitHub, not on disk.** Open issue = pending decision; closed =
-  consumed. Labels are state (`needs-decision`, `processing`, `resolved`,
-  `blocked`, `repo:*`, `kind:*`, `priority:*`). A hidden
+  consumed. Labels are state (`needs-decision`, `pending-triage`, `processing`,
+  `resolved`, `blocked`, `repo:*`, `kind:*`, `priority:*`). A hidden
   `<!-- wheelhouse-state: {...} -->` block in each card body carries
   `{repo, number, kind, head_sha, options}` plus the material fields
   `{comp, tests, priority}` (the latter three added so a refresh can cheaply and
@@ -47,7 +47,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   AND issue-triage) adds non-material cache fields such as
   `triaged_sha` and `triage_status`; those are deliberately outside
   `MATERIAL_FIELDS` so a triage result never changes classification or forces a
-  card refresh. The state block also carries `render_version`, another
+  card refresh. A held card also carries non-material `held: true` until its
+  first auto-triage attempt publishes the normal decision controls. The state
+  block also carries `render_version`, another
   non-material field alongside `triaged_sha`: it is a one-time re-render
   trigger stamped by `render()` (see "Card refresh" in Sharp edges) that exists
   purely so a display-only fix (e.g. the author `@mention` drop) propagates to
@@ -64,9 +66,10 @@ still appears where it's plain English, e.g. "triage the queue".)
 - **Workflows:** `ingest` (dispatch/manual -> upsert a card), `decision-handler`
   (tick/slash/**plain-English** -> act on target -> consume card), `scan-backstop`
   (hourly scan -> reconcile: create/refresh/close - the primary keep-current path
-  now that cards refresh on material change or render-version staleness; safe to
-  run hourly because reconcile is a full no-op when neither trigger fires, and
-  queues automatic PR or issue triage when the
+  now that cards refresh on material change, render-version staleness, or a
+  held-card publish trigger; safe to run hourly because reconcile is a full
+  no-op when none of those triggers fires, and queues automatic PR or issue
+  triage when the
   current revision (a PR's `head_sha`, or an issue's `updatedAt`) lacks a fresh
   `triaged_sha` cache; its "List open cards" step lists THIS repo's open cards via
   `gh api --paginate --slurp "repos/{owner}/{repo}/issues?..." | jq '...'` -
@@ -96,8 +99,9 @@ still appears where it's plain English, e.g. "triage the queue".)
   "Cross-repo reference qualification" in Sharp edges)),
   `render_card.py` (render + card CRUD; `CHECKBOX_OPTIONS`/`OPTION_LABELS` carry
   the per-kind checkboxes, including the non-consuming `investigate` box on
-  pr-review/issue-triage; automatic triage section rendering, `triaged_sha`
-  cache updates, and trusted triage-result card edits), `apply_decision.py` (deterministic `parse` then
+  pr-review/issue-triage; held `pending-triage` placeholder rendering;
+  automatic triage section rendering, `triaged_sha` cache updates, and trusted
+  triage-result card edits that publish held cards), `apply_decision.py` (deterministic `parse` then
   `execute`; the NON-CONSUMING `investigate` routing + `clear-checkbox`; plus the
   natural-language `nl-eligible`/`nl-prompt`/`nl-route` that map an owner's
   free-text comment to a structured result), `nl_readonly_search.py` (installs
@@ -175,7 +179,8 @@ still appears where it's plain English, e.g. "triage the queue".)
   The `TRIAGE_START`/`### Triage`/`TRIAGE_END` markers contain no
   `#N` so qualifying the whole section string leaves them intact.
   The shared pure helpers live in `render_card.py`
-  (`material_changed`, `render_stale`, `is_refreshable`, `plan_label_update`); `reconcile.py`
+  (`material_changed`, `render_stale`, `held_publish_needed`, `refresh_needed`,
+  `is_refreshable`, `plan_label_update`); `reconcile.py`
   pre-checks them (using the card row it already listed) so the common
   no-change case never hits the API, and `upsert_card` re-checks them before it
   edits (defense in depth for the event path). Three rules are load-bearing and
@@ -187,18 +192,23 @@ still appears where it's plain English, e.g. "triage the queue".)
     `NON_REFRESHABLE_LABELS`.) This is the chosen safe rule, and it gates the
     `render_version` trigger exactly the same way - a mid-decision card is
     never refreshed just because it is render-stale.
+    A held `pending-triage` card deliberately stays refreshable because it keeps
+    `needs-decision` and carries no non-refreshable lock label.
   - **No-op when neither trigger fires.** A card that is both materially
-    unchanged AND render-fresh gets no body edit, no label churn, and no
-    comment - never rewrite a card just to put back an identical body. The
+    unchanged AND render-fresh, and does not need held-state publishing, gets no
+    body edit, no label churn, and no comment - never rewrite a card just to
+    put back an identical body. The
     material check is a cheap dict compare of the state block's material
     fields, which is why those fields are carried in the state JSON; the
     render-staleness check is the same kind of cheap compare against
-    `render_version`.
+    `render_version`, and `held_publish_needed` is the same kind of cheap
+    predicate for a held card whose auto-triage path is no longer available.
   - **Replace the managed labels, don't just add.** `upsert_card` removes
     `repo:*`/`kind:*`/`priority:*`/`target:*` labels that no longer apply
     (`plan_label_update`), so a changed priority/kind doesn't leave both the old
-    and new label stuck on the card. `needs-decision` and any human-added label
-    are never removed.
+    and new label stuck on the card. It also syncs the exact `pending-triage`
+    label to the current `held` state. `needs-decision` and any human-added
+    label are never removed.
   When `head_sha` changed the refresh also drops a short "target updated" card
   comment so the owner sees a re-review is warranted rather than being silently
   swapped underneath. All of this stays on the ambient `GH_TOKEN` (= default
@@ -209,10 +219,11 @@ still appears where it's plain English, e.g. "triage the queue".)
   cards.
 - **Automatic triage is a cached card-side side job, not routing - and now
   covers issue-triage as well as pr-review, on two INDEPENDENT toggles.**
-  It applies only to pure `needs-decision` cards, gated per kind: pr-review by
-  the effective `auto_triage` setting, issue-triage by the effective
-  `auto_triage_issues` setting - each with its own global default (both TRUE),
-  per-repo override, and item-level opt-out, so flipping one never changes the
+  It applies only to pure `needs-decision` cards (including held
+  `pending-triage` cards, which deliberately retain `needs-decision`), gated
+  per kind: pr-review by the effective `auto_triage` setting, issue-triage by
+  the effective `auto_triage_issues` setting - each with its own global default
+  (both TRUE), per-repo override, and item-level opt-out, so flipping one never changes the
   other's behavior. Both also require `CLAUDE_CODE_OAUTH_TOKEN` to be present.
   For explicit ingest payloads, `auto_triage:false` / `auto_triage_issues:false`
   are item-level opt-outs only; neither can force triage on when the global or
@@ -318,6 +329,10 @@ still appears where it's plain English, e.g. "triage the queue".)
   publishing it with a generic "did not finish" note only in that exact
   stuck case, so it can never double-write over a result the normal update
   step already recorded, whether that result was a success or a `triage-fail`.
+  If the trusted source snapshot is unavailable, the workflow cannot safely run
+  `render_card.py`; in that narrow case it clears the queued triage cache for
+  the exact raw-input revision instead, so a future scan can retry rather than
+  leaving the held card permanently hidden.
 - Natural-language decisions are owner-comment-only and structured: the LLM
   returns `{mode: action|answer|clarify, action?, free_text?, answer?}` to
   `decision.json` and nothing else. `apply_decision.py nl-route` is the trust
@@ -569,13 +584,13 @@ search output are delimited untrusted data; the LLM never gets `FLEET_TOKEN`):
 Every `anthropics/claude-code-action` LLM step is pinned to `v1.0.161` at commit `fad22eb3fa582b7357fc0ea48af6645851b884fd` and passes `--model sonnet`.
 The pinned release resolves `@anthropic-ai/claude-agent-sdk` to `0.3.197`; on the Anthropic API, Claude Code versions v2.1.197 and later resolve `sonnet` to Sonnet 5.
 
-- **`triage.yml` - automatic, lightweight, advisory PR-card OR issue-card context.** Triggered by `scan-backstop` / `reconcile.py` and the ingest fast path for pure `needs-decision` pr-review OR issue-triage cards whose current revision (a PR's `head_sha`, or an issue's `updated_at`) does not match `triaged_sha`.
+- **`triage.yml` - automatic, lightweight, advisory PR-card OR issue-card context.** Triggered by `scan-backstop` / `reconcile.py` and the ingest fast path for pure `needs-decision` pr-review OR issue-triage cards whose current revision (a PR's `head_sha`, or an issue's `updated_at`) does not match `triaged_sha`; if the card is held under `pending-triage`, the update path also publishes its real checkboxes fail-open.
   pr-review is opt-out through `auto_triage`; issue-triage is opt-out through the INDEPENDENT `auto_triage_issues` - both global default true, per-repo override allowed, and both inert unless `CLAUDE_CODE_OAUTH_TOKEN` is present. Neither flag affects the other.
   For a pr-review card it checks out the target PR head read-only with `FLEET_TOKEN`, `persist-credentials: false`, and verifies the head did not move since queueing.
   For an issue-triage card it checks out the repo's DEFAULT branch read-only the same way (same substrate `deep-review.yml` uses for an issue card) - there is no head to verify.
   Both paths then run Claude with lower `--max-turns` than deep-review to produce only structured `{summary, product_implications, recommended_next_step}` context; the issue-triage prompt fetches the issue's title/body/comments (no diff) and asks for an issue-appropriate recommendation, while the pr-review prompt keeps the PR title/body/diff and merge-oriented recommendation - unchanged from before this feature.
   It writes the visible `### Triage` section by a trusted workflow step with `github.token`, never by Claude, and the result is advisory only.
-  It never changes classification, labels, checkbox decisions, `apply_decision.py`, merge/close/approve behavior, fork-CI safety, author filtering, or conflict routing.
+  Apart from publishing a held card's own `pending-triage` label and placeholder decision section, it never changes classification, labels, checkbox options, `apply_decision.py`, merge/close/approve behavior, fork-CI safety, author filtering, or conflict routing.
   Before dispatch, the queueing path writes `triaged_sha=<current revision>` and `triage_status=queued`, so errors and timeouts fail open without retriggering the same revision on every scan.
   Existing open cards of either kind with no `triaged_sha` are intentionally stale and backfill once on the next eligible scan.
   Optional `READONLY_TOKEN` search uses the unchanged `wheelhouse-search` wrapper and remains untrusted evidence only.

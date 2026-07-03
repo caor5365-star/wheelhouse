@@ -3,7 +3,8 @@
 Wheelhouse - decision-card renderer + card operations.
 
 `render(item)` turns one classified item into a decision card: a human-readable
-body with quick-decision checkboxes and a hidden machine-readable state block.
+body with quick-decision checkboxes (or a held auto-triage placeholder) and a
+hidden machine-readable state block.
 `upsert_card`/`close_card` create/refresh/consume cards in THIS repo (via the
 ambient GH_TOKEN, which the workflow sets to the default GITHUB_TOKEN so that
 card-side activity never re-triggers the handler).
@@ -403,7 +404,9 @@ def _label_names(labels):
 
 
 def is_refreshable(labels):
-    """A card is refreshable only in the pure `needs-decision` state."""
+    """A card is refreshable only while it has `needs-decision` and no
+    in-flight or terminal label. `pending-triage` is allowed because held cards
+    must still refresh, auto-triage, and self-heal."""
     names = _label_names(labels)
     return "needs-decision" in names and names.isdisjoint(NON_REFRESHABLE_LABELS)
 
@@ -923,11 +926,10 @@ def update_card_triage(number, revision, triage=None, error=None, owner=""):
 
     Publishing only happens when this attempt's revision still matches the
     card's own current revision. A mismatch means the card was refreshed to a
-    newer revision while this attempt was in flight; that refresh already
-    dropped the stale `held`-time state and (via `should_auto_triage`) queued
-    a fresh attempt for the new revision, which will publish the card itself
-    when it completes - so this stale attempt is correctly a no-op rather than
-    publishing outdated content."""
+    newer revision while this attempt was in flight; that refresh either kept a
+    held placeholder for the newer revision and queued a fresh attempt, or
+    published the card because auto triage was no longer eligible. This stale
+    attempt is therefore a no-op rather than publishing outdated content."""
     card = get_card(number)
     if not card or not issue_is_open(card) or not is_refreshable(card.get("labels")):
         return False
@@ -1044,11 +1046,12 @@ def upsert_card(item, existing=None, has_token=False):
       * Only a pure `needs-decision` card is refreshed; a card already
         `processing`/`resolved`/`blocked` is left untouched (never rewrite a
         decision in flight - re-rendering the body would reset its checkboxes).
-      * A refresh runs when a MATERIAL field changed OR the card's stored
+      * A refresh runs when a MATERIAL field changed, the card's stored
         `render_version` is behind `CARD_RENDER_VERSION` (a one-time, self-
         terminating re-render for display-only fixes and card-body repairs like
-        cached triage ref qualification); a card that is neither is a full
-        no-op (no body edit, no label churn, no comment).
+        cached triage ref qualification), or a held card must be published
+        because auto triage is no longer eligible; a card with none of those
+        triggers is a full no-op (no body edit, no label churn, no comment).
       * On refresh the wheelhouse-managed labels (`repo:`/`kind:`/`priority:`/
         `target:`) are REPLACED so stale ones are removed, and a head-SHA change
         also drops a short "target updated" comment. A held card whose refreshed

@@ -83,6 +83,8 @@ jobs:
       # issue-ops/parser, for both the new body and the pre-edit body. The
       # deterministic diff (exactly one newly-ticked option) happens in
       # apply_decision.py - we no longer scrape the Markdown by hand.
+      # Held `pending-triage` cards intentionally have no checkbox lines, and
+      # apply_decision.py also short-circuits on their hidden `held` state.
       # Only on a real BODY change: a title-only edit leaves
       # `changes.body.from` empty, and the parser errors on an empty `body`
       # input. (Non-body edits can't have newly-ticked a box anyway.)
@@ -114,10 +116,11 @@ jobs:
         run: python scripts/apply_decision.py parse
 
       # --- Natural-language path (opt-in) ------------------------------------
-      # An owner comment that is NOT a slash-command. Gated on nl_decisions in
-      # config AND the CLAUDE_CODE_OAUTH_TOKEN secret; inert otherwise. Claude
-      # only MAPS intent or answers a question - the deterministic steps below
-      # do any acting, so every guard still applies.
+      # An owner comment that is NOT a slash-command and not on a held
+      # `pending-triage` card. Gated on nl_decisions in config AND the
+      # CLAUDE_CODE_OAUTH_TOKEN secret; inert otherwise. Claude only MAPS
+      # intent or answers a question - the deterministic steps below do any
+      # acting, so every guard still applies.
       - id: nl-gate
         if: ${{ steps.gate.outputs.authorized == 'true' && github.event_name == 'issue_comment' && steps.decide.outputs.decision == '' }}
         env:

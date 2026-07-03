@@ -10,6 +10,8 @@ Phases, run as separate workflow steps so each uses the right token:
                tick is read from issue-ops/parser output (the `{selected,
                unselected}` JSON for the card's new and old body) - this script
                only diffs the parsed option keys, it no longer scrapes the body.
+               A held `pending-triage` card is intentionally inert until
+               render_card.py publishes its first auto-triage result.
                The NON-CONSUMING `investigate` tick is routed apart from every
                other action: it sets `investigate` (not `decision`) so the
                handler triggers deep-review.yml and leaves the card OPEN.
@@ -27,7 +29,8 @@ Phases, run as separate workflow steps so each uses the right token:
 Natural-language phases (gated on nl_decisions + CLAUDE_CODE_OAUTH_TOKEN):
 
   nl-eligible  Print true/false: is this an owner comment that should be routed
-               to the LLM intent-mapper? (a decision card AND not a slash-command).
+               to the LLM intent-mapper? (a decision card AND not held AND not
+               a slash-command).
 
   nl-prompt    Build the LLM prompt: the deterministic card context + the
                owner's comment (trusted instructions) plus the target content as
